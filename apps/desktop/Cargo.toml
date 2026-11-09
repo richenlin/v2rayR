@@ -1,0 +1,32 @@
+[package]
+name = "v2rayr-desktop"
+description = "Tauri 2 desktop shell for v2rayR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Intentionally outside the root workspace's default members: the Tauri
+# dependency tree is large and platform specific, so CI builds it separately
+# (`cargo tauri build`) while the crates stay buildable on their own.
+[workspace]
+
+[lib]
+name = "v2rayr_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+v2rayr-app = { path = "../../crates/app" }
+v2rayr-domain = { path = "../../crates/domain" }
+v2rayr-ipc = { path = "../../crates/ipc" }
+v2rayr-platform = { path = "../../crates/platform" }
+v2rayr-store = { path = "../../crates/store" }

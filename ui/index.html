@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>v2rayR</title>
+    <script>
+      window.addEventListener("error", (event) => {
+        document.title = "ERR " + String(event.error && event.error.stack || event.message);
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        document.title = "REJ " + String((event.reason && event.reason.stack) || event.reason);
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

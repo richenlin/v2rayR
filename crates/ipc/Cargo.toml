@@ -1,0 +1,17 @@
+[package]
+name = "v2rayr-ipc"
+description = "Serialisable request/response DTOs shared by the desktop shell, CLI and UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+v2rayr-domain = { path = "../domain" }

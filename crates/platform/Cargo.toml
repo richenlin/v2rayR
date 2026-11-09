@@ -1,0 +1,17 @@
+[package]
+name = "v2rayr-platform"
+description = "OS integration: system proxy takeover, autostart, port probing, app paths"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+tempfile.workspace = true
+v2rayr-domain = { path = "../domain" }

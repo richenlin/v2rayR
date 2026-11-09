@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>v2rayR · 连接工作台</title>
+<link rel="stylesheet" href="style.css">
+<div class="shell">
+<aside>
+<div class="brand"><svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="9" fill="#164e42"/><path d="M8 23l7-12 4 7 3-5 4 10M8 26h18" fill="none" stroke="#d9f6a9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>v2rayR</div>
+<div class="nav-label">工作台</div>
+<nav aria-label="主导航" id="nav"></nav>
+<div class="side-foot"><button id="theme" type="button">切换深色</button><small>DESIGN PREVIEW / 01</small></div>
+</aside>
+<main>
+<header><span>工作台 <span class="slash">/</span> <b id="crumb">连接</b></span><span class="tag">交互原型 · 模拟数据</span></header>
+<div id="page"></div>
+<footer><span>v2rayR / 桌面体验提案</span><span>模拟操作不会修改系统设置</span></footer>
+</main>
+</div>
+<dialog id="dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="section-head"><h2 id="dialog-title">导入</h2><button aria-label="关闭" value="cancel">关闭</button></div><p class="muted">原型只生成示例节点。请勿粘贴真实凭据。</p><label for="source">节点链接或订阅地址</label><textarea id="source" rows="3" placeholder="https://example.test/sub"></textarea><p id="validation" role="alert"></p><p id="preview" class="muted" hidden>示例预览：东京、新加坡、香港，共 3 个模拟节点。</p><button type="button" class="primary" id="import">预览示例</button></form></dialog>
+<div class="sr" role="status" id="announce"></div>
+<script src="settings.js"></script>
+<script src="app.js"></script>
+</html>

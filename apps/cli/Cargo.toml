@@ -1,0 +1,28 @@
+[package]
+name = "v2rayr-cli"
+description = "Command line front end for v2rayR (also the CI entry point)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "v2rayr"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+v2rayr-app = { path = "../../crates/app" }
+v2rayr-config = { path = "../../crates/config" }
+v2rayr-domain = { path = "../../crates/domain" }
+v2rayr-engine = { path = "../../crates/engine" }
+v2rayr-ipc = { path = "../../crates/ipc" }
+v2rayr-platform = { path = "../../crates/platform" }
+v2rayr-store = { path = "../../crates/store" }

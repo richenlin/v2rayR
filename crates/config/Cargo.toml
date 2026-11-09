@@ -1,0 +1,16 @@
+[package]
+name = "v2rayr-config"
+description = "Strongly typed sing-box / Xray / mihomo config emission"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+v2rayr-domain = { path = "../domain" }

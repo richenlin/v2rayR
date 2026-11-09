@@ -1,0 +1,24 @@
+[package]
+name = "v2rayr-helper"
+description = "Privileged helper: system proxy takeover, TUN setup, port reservation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+v2rayr-domain = { path = "../domain" }
+v2rayr-engine = { path = "../engine" }
+v2rayr-platform = { path = "../platform" }
+
+[dev-dependencies]
+tempfile.workspace = true

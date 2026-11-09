@@ -1,0 +1,21 @@
+[package]
+name = "v2rayr-engine"
+description = "Kernel supervision: binaries, config check, process lifecycle, control API, latency and subscription fetching"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+v2rayr-domain = { path = "../domain" }
+v2rayr-platform = { path = "../platform" }

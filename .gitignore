@@ -1,0 +1,21 @@
+# Rust
+/target
+**/target
+
+# Node / Vite
+ui/node_modules
+ui/dist
+ui/.vite
+*.tsbuildinfo
+
+# Tauri (built through `cargo tauri`, not by CI for plain `cargo test`)
+apps/desktop/gen
+
+# Local runtime data
+*.log
+.DS_Store
+.env
+.env.local
+
+# Preview artefacts
+screenshots/
