@@ -120,6 +120,7 @@ export interface StartupSettings {
   closeToTray: boolean;
   showTrayIcon: boolean;
   singleInstance: boolean;
+  connectOnLaunch: boolean;
 }
 
 export interface InboundSettings {

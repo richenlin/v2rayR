@@ -44,6 +44,7 @@ pub struct StartupSettings {
     pub close_to_tray: bool,
     pub show_tray_icon: bool,
     pub single_instance: bool,
+    pub connect_on_launch: bool,
 }
 
 impl Default for StartupSettings {
@@ -54,6 +55,7 @@ impl Default for StartupSettings {
             close_to_tray: true,
             show_tray_icon: true,
             single_instance: true,
+            connect_on_launch: false,
         }
     }
 }

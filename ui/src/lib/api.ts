@@ -278,6 +278,7 @@ const defaultSettings = (): SettingsView => ({
     closeToTray: true,
     showTrayIcon: true,
     singleInstance: true,
+    connectOnLaunch: false,
   },
   inbound: {
     mixedPort: 0,
@@ -391,7 +392,16 @@ function loadState(): MockState {
     return {
       ...seed,
       ...parsed,
-      settings: parsed.settings ?? seed.settings,
+      settings: {
+        ...seed.settings,
+        ...parsed.settings,
+        startup: { ...seed.settings.startup, ...parsed.settings?.startup },
+        inbound: { ...seed.settings.inbound, ...parsed.settings?.inbound },
+        routing: { ...seed.settings.routing, ...parsed.settings?.routing },
+        subscription: { ...seed.settings.subscription, ...parsed.settings?.subscription },
+        appearance: { ...seed.settings.appearance, ...parsed.settings?.appearance },
+        advanced: { ...seed.settings.advanced, ...parsed.settings?.advanced },
+      },
       rules: parsed.rules ?? seed.rules,
       cores: seed.cores,
       logs: parsed.logs ?? seed.logs,

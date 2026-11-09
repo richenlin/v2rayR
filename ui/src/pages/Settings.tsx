@@ -174,7 +174,7 @@ export function SettingsPage() {
     const hit = (keys: string[]) => keys.some((key) => t(key).toLowerCase().includes(term));
     return new Set<Group>(
       [
-        hit(["settings.launchAtLogin", "settings.startMinimized", "settings.closeToTray", "settings.showTrayIcon", "settings.singleInstance"]) ? "startup" : null,
+        hit(["settings.launchAtLogin", "settings.connectOnLaunch", "settings.startMinimized", "settings.closeToTray", "settings.showTrayIcon", "settings.singleInstance"]) ? "startup" : null,
         hit(["settings.mixedPort", "settings.allowLan", "settings.bypassLocal", "settings.bypassExtra", "settings.tunEnabled"]) ? "inbound" : null,
         hit(["settings.policy", "settings.ruleSet", "settings.blockAds", "settings.dnsStrategy", "settings.dnsServers", "settings.fakeIp", "settings.rules"]) ? "routing" : null,
         hit(["settings.interval", "settings.updateOnStart", "settings.concurrency", "settings.timeout", "settings.userAgent", "settings.keepRemoved"]) ? "subscription" : null,
@@ -201,6 +201,11 @@ export function SettingsPage() {
                   label={t("settings.launchAtLogin")}
                   onChange={(checked) => patch("startup", { launchAtLogin: checked })}
                 />
+              </Field>
+            ) : null}
+            {matches("settings.connectOnLaunch", "settings.connectOnLaunch.hint") ? (
+              <Field label={t("settings.connectOnLaunch")} hint={t("settings.connectOnLaunch.hint")} inline>
+                <Toggle checked={value.connectOnLaunch} label={t("settings.connectOnLaunch")} onChange={(checked) => patch("startup", { connectOnLaunch: checked })} />
               </Field>
             ) : null}
             {matches("settings.startMinimized") ? (

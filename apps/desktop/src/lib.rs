@@ -338,7 +338,9 @@ pub fn run() {
                 });
             }
 
-            install_tray(handle.handle())?;
+            if app.settings().startup.show_tray_icon {
+                install_tray(handle.handle())?;
+            }
 
             // "Start minimised" means: the tray is the UI until the user asks
             // for the window, which is how the login item should behave.
@@ -348,11 +350,54 @@ pub fn run() {
                 }
             }
 
+            // "Connect on launch" only fires when there is a node to reconnect
+            // to; a fresh install should land on the connection page instead of
+            // failing at startup.
+            let auto_connect = app.settings().startup.connect_on_launch;
+            let app_for_launch = Arc::clone(&app);
             handle.manage(Shell {
                 app,
                 handle: handle.handle().clone(),
                 _instance: instance,
             });
+            if auto_connect {
+                tauri::async_runtime::spawn(async move {
+                    use v2rayr_store::SessionMemory;
+                    let remembered = app_for_launch
+                        .db()
+                        .lock()
+                        .ok()
+                        .and_then(|db| db.active_profile());
+                    let Some(profile_id) = remembered else {
+                        tracing::info!("connect-on-launch: no remembered node");
+                        return;
+                    };
+                    let mode = app_for_launch
+                        .db()
+                        .lock()
+                        .ok()
+                        .and_then(|db| db.last_mode())
+                        .as_deref()
+                        .map(|mode| match mode {
+                            "pac" => v2rayr_ipc::TakeoverMode::Pac,
+                            "tun" => v2rayr_ipc::TakeoverMode::Tun,
+                            "manual" => v2rayr_ipc::TakeoverMode::Manual,
+                            _ => v2rayr_ipc::TakeoverMode::SystemProxy,
+                        })
+                        .unwrap_or(v2rayr_ipc::TakeoverMode::SystemProxy);
+                    let policy = app_for_launch.settings().policy();
+                    if let Err(problem) = app_for_launch
+                        .connect(ConnectionRequest {
+                            profile_id,
+                            mode,
+                            policy,
+                        })
+                        .await
+                    {
+                        tracing::warn!(?problem, "connect-on-launch failed");
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
