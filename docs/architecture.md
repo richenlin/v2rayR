@@ -65,6 +65,19 @@ Disconnected ──connect──► Connecting ──ok──► Connected ─�
 断开是反向流程：按快照恢复代理（只恢复自己改过的字段）→ 删除快照 → `SIGTERM` 内核（5s 宽限后 kill）→
 状态回到 `Disconnected`。应用异常退出后下次启动 `recover_takeover()` 会读快照并把代理恢复回去。
 
+## 选核与协议边界
+
+`crates/config/src/capability.rs` 是唯一的选核入口，规则按「显式指定 → 协议/传输硬约束 → sing-box 兜底」执行：
+
+- VLESS + `encryption=mlkem768x25519plus.*`（Xray 25.x 的 VLESS Encryption）→ 只能 Xray；
+  sing-box 不认识该字段，仍会启动失败。实测链路：Reality + `xtls-rprx-vision` + 0-RTT。
+- VLESS + xhttp / mKCP / QUIC → Xray；其余 VLESS/REALITY 默认 sing-box，可显式切 Xray。
+- Hysteria2 / TUIC / AnyTLS / WireGuard / Shadowsocks 2022 → sing-box；naive 与 Chain 明确拒绝并说明原因。
+
+Cargo 无法在未装 geoip/geosite 的目录里启动 Xray：`xray -test` 会报 `failed to open geoip.dat`，
+应用会把该输出翻译成「规则集、证书或内核路径可能没准备好」，提示把 `geoip.dat`/`geosite.dat`
+与内核放同一目录，而不是丢一段原始栈。
+
 ## 端口约定
 
 | 用途 | 值 |
