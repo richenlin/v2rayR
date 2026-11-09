@@ -22,3 +22,6 @@ screenshots/
 
 # Tooling caches
 .memsearch/
+
+# local build artifacts staged for testing
+/release
