@@ -26,3 +26,6 @@ v2rayr-engine = { path = "../../crates/engine" }
 v2rayr-ipc = { path = "../../crates/ipc" }
 v2rayr-platform = { path = "../../crates/platform" }
 v2rayr-store = { path = "../../crates/store" }
+
+[dev-dependencies]
+tempfile.workspace = true

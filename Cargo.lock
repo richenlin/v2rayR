@@ -1513,6 +1513,7 @@ dependencies = [
  "clap",
  "libc",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
  "v2rayr-app",

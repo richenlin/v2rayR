@@ -114,7 +114,7 @@ logs/                     内核日志与应用日志
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 238 个测试
+cargo test --workspace                     # 241 个测试
 cd ui && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite build
 ```
 

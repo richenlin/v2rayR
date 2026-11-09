@@ -227,12 +227,16 @@ fn nodes(app: &App, json: bool) -> anyhow::Result<()> {
 }
 
 fn import(app: &App, source: &str, json: bool) -> anyhow::Result<()> {
+    // `-` reads stdin; an existing file is read as a file; anything else is
+    // treated as the links themselves so `import 'vless://…'` just works.
     let raw = if source == "-" {
         let mut buffer = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)?;
         buffer
-    } else {
+    } else if std::path::Path::new(source).is_file() {
         std::fs::read_to_string(source).with_context(|| format!("reading {source}"))?
+    } else {
+        source.to_owned()
     };
     let summary = app
         .import_text(&ImportRequest {
