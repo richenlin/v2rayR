@@ -88,7 +88,8 @@ cd ui && pnpm install && pnpm dev     # http://localhost:1420
 
 # 4. 桌面壳（需要 tauri-cli 与完整工具链）
 cargo install tauri-cli --version "^2"
-cd apps/desktop && cargo tauri dev
+pnpm --dir ui build                 # 先把 UI 打包并内联成单文件
+cd apps/desktop && cargo tauri build   # 产出 .app 与 .dmg
 ```
 
 CLI 常用命令：`status`、`nodes`、`import <file|->`、`sub add/update/list`、`connect/disconnect/run`、`test`、

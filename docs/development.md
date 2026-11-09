@@ -35,12 +35,25 @@ pnpm build          # 类型检查 + 产物到 ui/dist
 
 ```bash
 cargo install tauri-cli --version "^2"
+pnpm --dir ui install
+pnpm --dir ui build        # 产出 ui/dist（最后一步会把 JS/CSS 内联进 index.html）
 cd apps/desktop
-cargo tauri dev      # 需要先 `pnpm --dir ../../ui install`
-cargo tauri build    # 产出 .app / .dmg
+cargo tauri build          # 产出 .app 与 .dmg
 ```
 
-`tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` 已经指向前端目录，不用手动起 dev server。
+前端要**先手动构建**：`tauri.conf.json` 里没有 `beforeBuildCommand`，因为 tauri-cli 执行该命令时的工作目录
+不确定，`../../ui` 会被解析到仓库外。打包前跑一次 `pnpm --dir ui build` 即可。
+
+`pnpm build` 的最后一步是 `node scripts/inline.mjs`：把 `assets/*.js` 与 `assets/*.css` 内联进
+`index.html`。原因有两个，都来自打包后 WebView 的实际行为：
+
+1. `tauri://` 协议下 WebKit 不加载外部 module script（`crossorigin` 与否都一样），页面会停在空白；
+   单文件文档没有子资源请求，绕开这一层。
+2. 同一协议下 `localStorage` 可能直接抛 `SecurityError`，因此前端所有存储访问都走
+   `ui/src/lib/storage.ts`，失败时退化为内存值。
+
+调试打包后的界面：应用启动时带 `V2RAYR_HOME=<临时目录>` 可以隔离真实配置；窗口截图用
+`screencapture -R x,y,w,h`，激活窗口用 `osascript -e 'tell application id "com.v2rayr.client" to activate'`。
 
 ## 离线预览（ui/ 单独跑）
 

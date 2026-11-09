@@ -1,4 +1,5 @@
+# esbuild ships a prebuilt binary via a postinstall script. pnpm 10+ blocks
+# dependency scripts by default, and without this the toolchain stops at
+# ERR_PNPM_IGNORED_BUILDS on every `pnpm build`.
 allowBuilds:
-  esbuild: set this to true or false
-onlyBuiltDependencies:
-  - esbuild
+  esbuild: true

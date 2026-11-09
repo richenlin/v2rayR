@@ -111,7 +111,8 @@ export interface TrafficView {
   totalDownBytes: number;
   totalUpBytes: number;
   connections: number;
-  samples: TrafficSample[];
+  /** Omitted by the backend while a session has no samples yet. */
+  samples?: TrafficSample[];
 }
 
 export interface StartupSettings {

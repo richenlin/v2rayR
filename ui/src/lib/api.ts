@@ -11,6 +11,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { readStorage, removeStorage, writeStorage } from "./storage";
 import type {
   AppSnapshot,
   CoreKind,
@@ -383,9 +384,8 @@ function seedState(): MockState {
 }
 
 function loadState(): MockState {
-  if (typeof localStorage === "undefined") return seedState();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readStorage(STORAGE_KEY);
     if (!raw) return seedState();
     const parsed = JSON.parse(raw) as Partial<MockState>;
     const seed = seedState();
@@ -416,9 +416,8 @@ function loadState(): MockState {
 const state = loadState();
 
 function persist(): void {
-  if (typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(
+    writeStorage(
       STORAGE_KEY,
       JSON.stringify({
         nodes: state.nodes,
@@ -919,6 +918,6 @@ export { toProblem };
 
 /** Reset the preview to its seeded state; used by the "preview scenario" group. */
 export function resetPreviewData(): void {
-  if (typeof localStorage !== "undefined") localStorage.removeItem(STORAGE_KEY);
+  removeStorage(STORAGE_KEY);
   window.location.reload();
 }

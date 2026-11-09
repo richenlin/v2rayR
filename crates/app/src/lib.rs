@@ -683,6 +683,16 @@ impl App {
         }
     }
 
+    /// The profile the last session used, for "connect on launch".
+    pub fn remembered_profile(&self) -> Option<Uuid> {
+        self.db.lock().ok().and_then(|db| db.active_profile())
+    }
+
+    /// The takeover mode the last session used, as its stored string.
+    pub fn remembered_mode(&self) -> Option<String> {
+        self.db.lock().ok().and_then(|db| db.last_mode())
+    }
+
     pub(crate) fn db(&self) -> std::sync::MutexGuard<'_, Database> {
         self.db.lock().expect("db")
     }

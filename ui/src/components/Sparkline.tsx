@@ -1,7 +1,7 @@
 import type { TrafficSample } from "../lib/types";
 
 interface SparklineProps {
-  samples: TrafficSample[];
+  samples?: TrafficSample[];
   /** Which series to draw; the connection page shows download by default. */
   series?: "down" | "up";
   height?: number;
@@ -11,7 +11,7 @@ interface SparklineProps {
  * A hand-rolled SVG chart. 60 points, no library, no animation on every tick
  * (only a CSS transition on the path), because the window updates once a second.
  */
-export function Sparkline({ samples, series = "down", height = 92 }: SparklineProps) {
+export function Sparkline({ samples = [], series = "down", height = 92 }: SparklineProps) {
   const width = 520;
   const pad = 4;
   const window = 60;

@@ -68,6 +68,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: ui/pnpm-lock.yaml
       - run: pnpm --dir ui install --frozen-lockfile
+      # `beforeBuildCommand` would depend on the directory tauri-cli picks as
+      # the project root, so the UI bundle is built explicitly instead.
+      - run: pnpm --dir ui build
       - run: cargo install tauri-cli --version "^2" --locked
       - run: cargo tauri build --no-bundle
         working-directory: apps/desktop

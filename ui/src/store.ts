@@ -9,6 +9,7 @@
 import { create } from "zustand";
 import { api, isPreview, toProblem } from "./lib/api";
 import { resolveLang, translate, type Lang } from "./lib/i18n";
+import { readStorage, writeStorage } from "./lib/storage";
 import type {
   AppSnapshot,
   LatencyResult,
@@ -90,7 +91,7 @@ let toastSeq = 0;
 
 function detectInitialTheme(): "light" | "dark" {
   if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem("v2rayr.theme");
+  const stored = readStorage("v2rayr.theme");
   if (stored === "light" || stored === "dark") return stored;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
@@ -158,7 +159,7 @@ export const useStore = create<State>((set, get) => ({
 
   toggleTheme: () => {
     const next = get().themeMode === "dark" ? "light" : "dark";
-    window.localStorage.setItem("v2rayr.theme", next);
+    writeStorage("v2rayr.theme", next);
     set({ themeMode: next });
     applyDocumentTheme(next);
   },
@@ -419,7 +420,7 @@ export const useStore = create<State>((set, get) => ({
       if (settings.appearance.theme !== "system") {
         set({ themeMode: settings.appearance.theme });
         applyDocumentTheme(settings.appearance.theme);
-        window.localStorage.setItem("v2rayr.theme", settings.appearance.theme);
+        writeStorage("v2rayr.theme", settings.appearance.theme);
       }
       get().toast("ok", translate(get().lang, "common.saved"));
       return true;

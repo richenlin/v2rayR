@@ -6,11 +6,24 @@
     <meta name="color-scheme" content="light dark" />
     <title>v2rayR</title>
     <script>
+      function showBootError(text) {
+        document.title = "ERR " + text;
+        var root = document.getElementById("root");
+        if (!root) return;
+        root.textContent = "";
+        var pre = document.createElement("pre");
+        pre.style.cssText = "color:#a3372f;white-space:pre-wrap;padding:16px;font:13px monospace";
+        pre.textContent = text;
+        root.appendChild(pre);
+      }
       window.addEventListener("error", (event) => {
-        document.title = "ERR " + String(event.error && event.error.stack || event.message);
+        var where = event.filename ? event.filename + ":" + event.lineno + ":" + event.colno : "?";
+        var stack = (event.error && event.error.stack) || "";
+        showBootError("msg: " + event.message + "\nwhere: " + where + "\n" + stack);
       });
       window.addEventListener("unhandledrejection", (event) => {
-        document.title = "REJ " + String((event.reason && event.reason.stack) || event.reason);
+        var reason = event.reason;
+        showBootError("rejected: " + String((reason && reason.stack) || reason));
       });
     </script>
   </head>

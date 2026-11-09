@@ -18,7 +18,6 @@ use v2rayr_platform::{AppPaths, InstanceGuard, InstanceOutcome, acquire_single_i
 
 struct Shell {
     app: Arc<App>,
-    handle: AppHandle,
     /// Held for the lifetime of the process; dropping it releases the lock.
     _instance: Option<InstanceGuard>,
 }
@@ -53,9 +52,11 @@ async fn session_connect(
     request: SessionRequest,
 ) -> Result<Value, Problem> {
     let request = ConnectionRequest {
-        profile_id: request.profile_id,
-        mode: request.mode,
-        policy: request.policy,
+        profile_id: request.profile_id.ok_or_else(|| {
+            Problem::new("not_connected", false).with_detail("还没有选择节点；请先在节点页挑选一个")
+        })?,
+        mode: request.mode.unwrap_or(v2rayr_ipc::TakeoverMode::SystemProxy),
+        policy: request.policy.unwrap_or(v2rayr_ipc::RoutingPolicy::Rule),
     };
     let snapshot = state.app.connect(request).await?;
     Ok(serde_json::to_value(snapshot).unwrap_or(Value::Null))
@@ -114,7 +115,7 @@ fn node_set_favorite(state: State<'_, Shell>, id: Uuid, favorite: bool) -> Resul
 
 #[tauri::command]
 fn node_set_tags(state: State<'_, Shell>, id: Uuid, tags: Vec<String>) -> Result<(), Problem> {
-    state.app.set_tags(id, tags)
+    state.app.set_tags(id, &tags)
 }
 
 #[tauri::command]
@@ -209,8 +210,8 @@ fn cores_status(state: State<'_, Shell>) -> Value {
 }
 
 #[tauri::command]
-async fn cores_probe(state: State<'_, Shell>) -> Value {
-    serde_json::to_value(state.app.refresh_core_versions().await).unwrap_or(Value::Null)
+async fn cores_probe(state: State<'_, Shell>) -> Result<Value, Problem> {
+    Ok(serde_json::to_value(state.app.refresh_core_versions().await).unwrap_or(Value::Null))
 }
 
 #[tauri::command]
@@ -277,11 +278,11 @@ fn paths(state: State<'_, Shell>) -> Value {
 /// Entry point shared by `main.rs` and mobile targets.
 pub fn run() {
     tracing::info!("starting v2rayR desktop");
-    let paths = AppPaths::discover().unwrap_or_else(|_| AppPaths::new("."));
+    let app_paths = AppPaths::discover().unwrap_or_else(|_| AppPaths::new("."));
 
     // One instance per user. A second launch raises the window that is already
     // open instead of starting a second kernel and a second proxy takeover.
-    let instance = match acquire_single_instance(&paths.runtime_dir().join("v2rayr.lock")) {
+    let instance = match acquire_single_instance(&app_paths.runtime_dir().join("v2rayr.lock")) {
         Ok(InstanceOutcome::Primary(guard)) => Some(guard),
         Ok(InstanceOutcome::AlreadyRunning(pid)) => {
             tracing::info!(pid, "another instance is running; asking it to come forward");
@@ -303,7 +304,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(move |handle| {
-            let app_paths = paths.clone();
+            let app_paths = app_paths.clone();
             let events = Arc::new(TauriEvents {
                 handle: handle.handle().clone(),
             });
@@ -325,13 +326,10 @@ pub fn run() {
             if !clipboard.is_empty() {
                 let importer = Arc::clone(&app);
                 tauri::async_runtime::spawn(async move {
-                    match importer
-                        .import_text(&ImportRequest {
-                            text: clipboard,
-                            subscription_id: None,
-                        })
-                        .await
-                    {
+                    match importer.import_text(&ImportRequest {
+                        text: clipboard,
+                        subscription_id: None,
+                    }) {
                         Ok(summary) => tracing::info!(added = summary.report.added.len(), "imported from command line"),
                         Err(problem) => tracing::warn!(?problem, "command-line import failed"),
                     }
@@ -357,26 +355,17 @@ pub fn run() {
             let app_for_launch = Arc::clone(&app);
             handle.manage(Shell {
                 app,
-                handle: handle.handle().clone(),
                 _instance: instance,
             });
             if auto_connect {
                 tauri::async_runtime::spawn(async move {
-                    use v2rayr_store::SessionMemory;
-                    let remembered = app_for_launch
-                        .db()
-                        .lock()
-                        .ok()
-                        .and_then(|db| db.active_profile());
+                    let remembered = app_for_launch.remembered_profile();
                     let Some(profile_id) = remembered else {
                         tracing::info!("connect-on-launch: no remembered node");
                         return;
                     };
                     let mode = app_for_launch
-                        .db()
-                        .lock()
-                        .ok()
-                        .and_then(|db| db.last_mode())
+                        .remembered_mode()
                         .as_deref()
                         .map(|mode| match mode {
                             "pac" => v2rayr_ipc::TakeoverMode::Pac,
@@ -512,13 +501,7 @@ fn install_tray(handle: &AppHandle) -> tauri::Result<()> {
                 };
                 let app = Arc::clone(&shell.app);
                 tauri::async_runtime::spawn(async move {
-                    use v2rayr_store::SessionMemory;
-                    let stored = app
-                        .db()
-                        .lock()
-                        .ok()
-                        .and_then(|db| db.last_mode())
-                        .unwrap_or_default();
+                    let stored = app.remembered_mode().unwrap_or_default();
                     let mode = match stored.as_str() {
                         "pac" => v2rayr_ipc::TakeoverMode::Pac,
                         "tun" => v2rayr_ipc::TakeoverMode::Tun,
