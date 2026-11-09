@@ -41,6 +41,9 @@ pub struct ProxyTarget {
     pub http: Option<ProxyEndpoint>,
     pub https: Option<ProxyEndpoint>,
     pub socks: Option<ProxyEndpoint>,
+    /// When set, every service is pointed at this PAC URL and the manual proxy
+    /// slots are switched off, per the design doc ("PAC 模式…同时关闭系统手动代理").
+    pub pac: Option<String>,
     pub bypass: Vec<String>,
     pub mode: BypassMode,
 }
@@ -53,13 +56,26 @@ impl ProxyTarget {
             http: Some(endpoint.clone()),
             https: Some(endpoint.clone()),
             socks: Some(endpoint),
+            pac: None,
             bypass: default_bypass(),
             mode: BypassMode::LoopbackOnly,
         }
     }
 
+    /// Take over through a PAC script served at `url`.
+    pub fn through_pac(url: impl Into<String>, bypass: Vec<String>) -> Self {
+        Self {
+            http: None,
+            https: None,
+            socks: None,
+            pac: Some(url.into()),
+            bypass,
+            mode: BypassMode::LoopbackOnly,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.http.is_none() && self.https.is_none() && self.socks.is_none()
+        self.pac.is_none() && self.http.is_none() && self.https.is_none() && self.socks.is_none()
     }
 }
 
@@ -86,6 +102,11 @@ pub struct ServiceProxyState {
     pub http: Option<ProxyEndpoint>,
     pub https: Option<ProxyEndpoint>,
     pub socks: Option<ProxyEndpoint>,
+    /// Automatic proxy configuration (PAC) URL, if one was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_url: Option<String>,
+    #[serde(default)]
+    pub auto_enabled: bool,
     pub bypass: Vec<String>,
 }
 
@@ -94,13 +115,21 @@ pub struct ServiceProxyState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TakeoverSnapshot {
     pub services: Vec<ServiceProxyState>,
-    pub applied_endpoint: ProxyEndpoint,
+    /// The endpoint we wrote; `None` when we took over through a PAC script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_endpoint: Option<ProxyEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_pac: Option<String>,
     pub applied_at_ms: i64,
 }
 
 impl TakeoverSnapshot {
     pub fn owned_by(&self, endpoint: &ProxyEndpoint) -> bool {
-        &self.applied_endpoint == endpoint
+        self.applied_endpoint.as_ref() == Some(endpoint)
+    }
+
+    pub fn owns_pac(&self, url: &str) -> bool {
+        self.applied_pac.as_deref() == Some(url)
     }
 
     /// True when the current state still points at the endpoint we applied, i.e.
@@ -114,14 +143,19 @@ impl TakeoverSnapshot {
             match previous {
                 Some(previous) => {
                     let ours = |endpoint: &Option<ProxyEndpoint>| {
-                        endpoint.as_ref() == Some(&self.applied_endpoint)
+                        self.applied_endpoint.is_some() && endpoint == &self.applied_endpoint
                     };
                     // Either untouched (previous) or ours.
                     let matches_previous = service.http == previous.http
                         && service.https == previous.https
                         && service.socks == previous.socks
-                        && service.enabled == previous.enabled;
-                    matches_previous || ours(&service.http) || ours(&service.socks)
+                        && service.enabled == previous.enabled
+                        && service.auto_url == previous.auto_url
+                        && service.auto_enabled == previous.auto_enabled;
+                    let our_pac = self.applied_pac.is_some()
+                        && service.auto_enabled
+                        && service.auto_url == self.applied_pac;
+                    matches_previous || our_pac || ours(&service.http) || ours(&service.socks)
                 }
                 None => false,
             }
@@ -238,7 +272,8 @@ impl MacOsSystemProxy {
             service,
             &["-getsocksfirewallproxystate"],
         )?;
-        let enabled = http.0 || https.0 || socks.0;
+        let (auto_url, auto_enabled) = self.read_auto(service)?;
+        let enabled = http.0 || https.0 || socks.0 || auto_enabled;
         let mut bypass = self.read_bypass(service)?;
         bypass.sort();
         Ok(ServiceProxyState {
@@ -247,6 +282,8 @@ impl MacOsSystemProxy {
             http: http.1,
             https: https.1,
             socks: socks.1,
+            auto_url,
+            auto_enabled,
             bypass,
         })
     }
@@ -282,6 +319,57 @@ impl MacOsSystemProxy {
             ));
         }
         Ok(parse_bypass(&output.stdout))
+    }
+
+    /// `networksetup -getautoproxyurl` prints a `URL:` line plus `Enabled: Yes`.
+    fn read_auto(&self, service: &str) -> Result<(Option<String>, bool), PlatformError> {
+        let output = self.run(&["-getautoproxyurl", service])?;
+        if !output.ok() {
+            // Not every macOS version answers for every service; treat as unset.
+            return Ok((None, false));
+        }
+        let mut url = None;
+        let mut enabled = false;
+        for line in output.stdout.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "URL" if !value.is_empty() => url = Some(value.to_owned()),
+                "Enabled" => enabled = value.eq_ignore_ascii_case("yes"),
+                _ => {}
+            }
+        }
+        Ok((url, enabled))
+    }
+
+    fn set_auto(
+        &self,
+        service: &str,
+        url: Option<&str>,
+        enabled: bool,
+    ) -> Result<(), PlatformError> {
+        if let Some(url) = url {
+            let output = self.run(&["-setautoproxyurl", service, url])?;
+            if !output.ok() {
+                return Err(command_error(
+                    &self.networksetup,
+                    &["-setautoproxyurl", service],
+                    &output,
+                ));
+            }
+        }
+        let state = if enabled { "on" } else { "off" };
+        let output = self.run(&["-setautoproxystate", service, state])?;
+        if !output.ok() {
+            return Err(command_error(
+                &self.networksetup,
+                &["-setautoproxystate", service, state],
+                &output,
+            ));
+        }
+        Ok(())
     }
 
     fn set_endpoint(
@@ -368,14 +456,18 @@ impl SystemProxy for MacOsSystemProxy {
         }
         // Everything is restored from this snapshot, so it must exist before the
         // first mutating command runs.
+        let endpoint = target
+            .http
+            .clone()
+            .or_else(|| target.socks.clone())
+            .or_else(|| target.https.clone());
+        if endpoint.is_none() && target.pac.is_none() {
+            return Err(PlatformError::InvalidState("no endpoint".to_owned()));
+        }
         let mut snapshot = TakeoverSnapshot {
             services: capture.services.clone(),
-            applied_endpoint: target
-                .http
-                .clone()
-                .or_else(|| target.socks.clone())
-                .or_else(|| target.https.clone())
-                .ok_or_else(|| PlatformError::InvalidState("no endpoint".to_owned()))?,
+            applied_endpoint: endpoint,
+            applied_pac: target.pac.clone(),
             applied_at_ms: chrono::Utc::now().timestamp_millis(),
         };
 
@@ -383,6 +475,28 @@ impl SystemProxy for MacOsSystemProxy {
             // Skip services that are switched off entirely (e.g. a dormant
             // Thunderbolt bridge); touching them confuses macOS.
             let result = (|| -> Result<(), PlatformError> {
+                if let Some(url) = &target.pac {
+                    // PAC mode owns every slot: manual proxies are switched off so
+                    // the two mechanisms cannot fight over the same connection.
+                    for (setter, state_setter) in [
+                        ("-setwebproxy", "-setwebproxystate"),
+                        ("-setsecurewebproxy", "-setsecurewebproxystate"),
+                        ("-setsocksfirewallproxy", "-setsocksfirewallproxystate"),
+                    ] {
+                        let _ = setter;
+                        self.set_endpoint(
+                            state_setter,
+                            state_setter,
+                            &service.service,
+                            None,
+                            false,
+                        )?;
+                    }
+                    self.set_auto(&service.service, Some(url), true)?;
+                    return self.set_bypass(&service.service, &target.bypass);
+                }
+                // Manual mode must not fight a leftover PAC script.
+                self.set_auto(&service.service, None, false)?;
                 if let Some(endpoint) = &target.http {
                     self.set_endpoint(
                         "-setwebproxy",
@@ -425,6 +539,11 @@ impl SystemProxy for MacOsSystemProxy {
 
     fn restore(&self, snapshot: &TakeoverSnapshot) -> Result<(), PlatformError> {
         for service in &snapshot.services {
+            self.set_auto(
+                &service.service,
+                service.auto_url.as_deref(),
+                service.auto_enabled,
+            )?;
             self.set_endpoint(
                 "-setwebproxy",
                 "-setwebproxystate",
@@ -570,15 +689,18 @@ mod tests {
                 program.to_owned(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
-            self.outputs
+            // Extra read calls (`-getautoproxyurl`) are harmless: default to an
+            // empty, successful answer so scripts only spell out what matters.
+            Ok(self
+                .outputs
                 .lock()
                 .expect("lock")
                 .pop_front()
-                .ok_or_else(|| PlatformError::Command {
-                    program: "unexpected".into(),
-                    args: Vec::new(),
-                    message: "no scripted output".into(),
-                })
+                .unwrap_or(CommandOutput {
+                    status: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }))
         }
     }
 
@@ -653,7 +775,10 @@ mod tests {
             snapshot.services[0].http,
             Some(ProxyEndpoint::new("127.0.0.1", 7890))
         );
-        assert_eq!(snapshot.applied_endpoint.port, 10808);
+        assert_eq!(
+            snapshot.applied_endpoint.as_ref().map(|e| e.port),
+            Some(10808)
+        );
 
         let calls = runner.calls();
         let setters: Vec<&String> = calls
@@ -703,9 +828,12 @@ mod tests {
                 http: Some(ProxyEndpoint::new("127.0.0.1", 7890)),
                 https: None,
                 socks: None,
+                auto_url: None,
+                auto_enabled: false,
                 bypass: vec![],
             }],
-            applied_endpoint: ProxyEndpoint::new("127.0.0.1", 10808),
+            applied_endpoint: Some(ProxyEndpoint::new("127.0.0.1", 10808)),
+            applied_pac: None,
             applied_at_ms: 0,
         };
         assert!(snapshot.owned_by(&ProxyEndpoint::new("127.0.0.1", 10808)));
@@ -715,6 +843,8 @@ mod tests {
             http: Some(ProxyEndpoint::new("127.0.0.1", 10808)),
             https: None,
             socks: None,
+            auto_url: None,
+            auto_enabled: false,
             bypass: vec![],
         }]));
         assert!(!snapshot.still_applied(&[ServiceProxyState {
@@ -723,6 +853,8 @@ mod tests {
             http: Some(ProxyEndpoint::new("127.0.0.1", 9090)),
             https: None,
             socks: None,
+            auto_url: None,
+            auto_enabled: false,
             bypass: vec![],
         }]));
     }

@@ -10,6 +10,7 @@ pub mod error;
 pub mod importer;
 pub mod latency;
 pub mod logging;
+mod rules;
 pub mod session;
 pub mod settings;
 pub mod subscriptions;
@@ -318,16 +319,33 @@ impl App {
         statuses
     }
 
-    pub fn install_core(&self, kind: CoreKind) -> Result<CoreStatus, Problem> {
-        Err(
-            Problem::new(v2rayr_domain::ErrorCode::CoreMissing.as_str(), false).with_detail(
-                format!(
-                    "自动下载尚未启用。请把 {} 放到 {}，或使用「选择内核路径」。",
-                    kind.as_str(),
-                    self.paths.core_bin_dir().display()
-                ),
-            ),
-        )
+    /// Download and install a kernel, then re-probe it.
+    ///
+    /// `url` and `sha256` are optional overrides; without them the pinned
+    /// release in `v2rayr_engine::default_release` is used. When a digest is
+    /// known it is always verified before anything is replaced.
+    pub async fn install_core(
+        &self,
+        kind: CoreKind,
+        url: Option<String>,
+        sha256: Option<String>,
+    ) -> Result<CoreStatus, Problem> {
+        let dir = self.paths.core_bin_dir();
+        let path = v2rayr_engine::download_core(kind, &dir, url.as_deref(), sha256.as_deref())
+            .await
+            .map_err(error::from_engine)?;
+        self.logs.info(
+            "cores",
+            format!("{} 已安装到 {}", kind.as_str(), path.display()),
+        );
+        self.rescan_cores();
+        self.cores_status()
+            .into_iter()
+            .find(|status| status.kind == kind)
+            .ok_or_else(|| {
+                Problem::new(v2rayr_domain::ErrorCode::CoreMissing.as_str(), false)
+                    .with_detail(format!("{} 安装后仍不可用", kind.as_str()))
+            })
     }
 
     /// Point the app at a user-chosen kernel binary.
@@ -818,10 +836,8 @@ pub(crate) mod test_support {
         ) -> Result<v2rayr_platform::TakeoverSnapshot, v2rayr_platform::PlatformError> {
             Ok(v2rayr_platform::TakeoverSnapshot {
                 services: Vec::new(),
-                applied_endpoint: target
-                    .http
-                    .clone()
-                    .unwrap_or_else(|| v2rayr_platform::proxy::ProxyEndpoint::new("127.0.0.1", 0)),
+                applied_endpoint: target.http.clone(),
+                applied_pac: target.pac.clone(),
                 applied_at_ms: 0,
             })
         }

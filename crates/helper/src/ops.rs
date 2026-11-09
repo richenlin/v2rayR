@@ -137,10 +137,8 @@ mod tests {
             self.applied.lock().expect("lock").push(target.clone());
             Ok(TakeoverSnapshot {
                 services: Vec::new(),
-                applied_endpoint: target
-                    .http
-                    .clone()
-                    .unwrap_or_else(|| ProxyEndpoint::new("127.0.0.1", 10808)),
+                applied_endpoint: target.http.clone(),
+                applied_pac: target.pac.clone(),
                 applied_at_ms: 1,
             })
         }
@@ -227,7 +225,8 @@ mod tests {
         };
         let snapshot = serde_json::to_value(TakeoverSnapshot {
             services: Vec::new(),
-            applied_endpoint: ProxyEndpoint::new("127.0.0.1", 10808),
+            applied_endpoint: Some(ProxyEndpoint::new("127.0.0.1", 10808)),
+            applied_pac: None,
             applied_at_ms: 0,
         })
         .expect("snapshot");

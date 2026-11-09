@@ -27,6 +27,8 @@ pub enum ConnectionPhase {
 pub enum TakeoverMode {
     /// macOS/Windows system proxy pointing at the mixed inbound.
     SystemProxy,
+    /// Automatic proxy configuration (PAC) served over loopback.
+    Pac,
     /// Virtual interface; requires the privileged helper.
     Tun,
     /// Do nothing to the OS, just run the inbound for other apps to use.

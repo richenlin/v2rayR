@@ -215,10 +215,12 @@ export function ConnectionPage() {
                 onChange={(event) => void setMode(event.target.value as TakeoverMode)}
               >
                 <option value="system-proxy">{t("connection.mode.system")}</option>
+                <option value="pac">{t("connection.mode.pac")}</option>
                 <option value="manual">{t("connection.mode.manual")}</option>
                 <option value="tun">{t("connection.mode.tun")}</option>
               </select>
               {mode === "tun" ? <p className="field-hint">{t("connection.mode.tunHint")}</p> : null}
+              {mode === "pac" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
             </div>
             <div>
               <label className="field-label" htmlFor="routing-policy">
@@ -238,9 +240,14 @@ export function ConnectionPage() {
               </select>
               {snapshot.connection.inboundPort ? (
                 <p className="field-hint mono" style={{ marginTop: 8 }}>
-                  {snapshot.connection.mode === "system-proxy" ? "HTTP/SOCKS" : "SOCKS"} 127.0.0.1:
+                  {snapshot.connection.mode === "system-proxy" || snapshot.connection.mode === "pac" ? "HTTP/SOCKS" : "SOCKS"} 127.0.0.1:
                   {snapshot.connection.inboundPort}
                   {snapshot.connection.apiPort ? ` · API ${snapshot.connection.apiPort}` : ""}
+                </p>
+              ) : null}
+              {snapshot.connection.mode === "pac" ? (
+                <p className="field-hint mono" style={{ marginTop: 6 }}>
+                  PAC http://127.0.0.1:10811/proxy.pac
                 </p>
               ) : null}
             </div>

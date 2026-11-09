@@ -14,19 +14,24 @@
 //! logic is covered by tests with a scripted runner instead of mocks of the OS.
 
 pub mod autostart;
+pub mod pac;
 pub mod paths;
 pub mod ports;
 pub mod proxy;
+pub mod single_instance;
 
 use thiserror::Error;
 
 pub use autostart::{Autostart, LaunchAgentAutostart};
+pub use pac::{PacServer, render_pac};
 pub use paths::AppPaths;
+pub use ports::PortState;
 pub use ports::Ports;
 pub use proxy::{
     BypassMode, CommandOutput, CommandRunner, MacOsSystemProxy, ProxyEndpoint, ServiceProxyState,
     SystemCommandRunner, SystemProxy, SystemProxyState, TakeoverSnapshot,
 };
+pub use single_instance::{InstanceGuard, InstanceOutcome, acquire as acquire_single_instance};
 
 #[derive(Debug, Error)]
 pub enum PlatformError {

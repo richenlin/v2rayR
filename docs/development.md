@@ -72,6 +72,21 @@ cargo tauri build    # 产出 .app / .dmg
 改 `settings.json` 的结构（重命名/移动字段）必须同时把 `CURRENT_SCHEMA` 加一，并在 `Settings::migrate`
 里写幂等迁移；旧版本读到新文件会备份后回退默认值，不会猜着读。
 
+## 新增一处「方案里有、代码里没有」的能力
+
+先确认它属于哪一层，再按层加：
+
+| 能力 | 落点 | 配套改动 |
+| --- | --- | --- |
+| 新订阅格式 | `crates/domain/src/<format>.rs` + `sniff_subscription` | `crates/engine/src/fetcher.rs` 转 `ImportPreview`；空导入必须报错 |
+| 新接入方式 | `v2rayr_platform::ProxyTarget` + `TakeoverMode` | `app/src/session.rs` 的 connect/disconnect 分支；UI 下拉与端口行 |
+| 新内核/下载源 | `crates/engine/src/dist.rs` | 版本、平台 slug、SHA-256、解压命令行 |
+| 新设置项 | `crates/ipc/src/settings.rs` → `crates/app/src/settings.rs`（校验/迁移） | `CURRENT_SCHEMA` 提升；UI `Settings.tsx` 的 `Field` 与 i18n |
+| 新命令 | `crates/ipc/src/commands.rs` → `crates/app` 方法 → `apps/desktop` 适配 → `ui/src/lib/api.ts` | mock 后端也要实现，否则预览与真机行为分叉 |
+
+`ui/src/lib/api.ts` 的 mock 后端是验收工具，不是装饰：新增字段/命令后先让 mock 与 Rust 语义一致
+（校验、错误码、`undefined` 而不是过期端口），再用它在浏览器里做视觉自检。
+
 ## 测试约定
 
 - 库层测试就近放在模块底部（`#[cfg(test)] mod tests`），集成契约放 `crates/*/tests/`。

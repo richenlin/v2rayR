@@ -19,6 +19,7 @@ import type {
   LatencyResult,
   LogEntry,
   NodeView,
+  RuleView,
   SettingsGroupId,
   SettingsPatch,
   SettingsView,
@@ -52,7 +53,11 @@ export interface Backend {
   saveSettings(patches: SettingsPatch[]): Promise<SettingsView>;
   resetSettings(): Promise<SettingsView>;
   cores(): Promise<CoreStatus[]>;
-  installCore(kind: CoreKind): Promise<CoreStatus>;
+  installCore(kind: CoreKind, url?: string, sha256?: string): Promise<CoreStatus>;
+  rules(): Promise<RuleView[]>;
+  addRule(kind: string, value: string, action: string): Promise<RuleView[]>;
+  setRuleEnabled(id: string, enabled: boolean): Promise<RuleView[]>;
+  removeRule(id: string): Promise<RuleView[]>;
   logs(limit: number): Promise<LogEntry[]>;
   paths(): Promise<Record<string, string>>;
 }
@@ -102,7 +107,11 @@ const tauriBackend: Backend = {
   },
   resetSettings: () => invoke<SettingsView>("settings_reset"),
   cores: () => invoke<CoreStatus[]>("cores_probe"),
-  installCore: (kind) => invoke<CoreStatus>("cores_install", { kind }),
+  installCore: (kind, url, sha256) => invoke<CoreStatus>("cores_install", { kind, url, sha256 }),
+  rules: () => invoke<RuleView[]>("rules_list"),
+  addRule: (kind, value, action) => invoke<RuleView[]>("rule_add", { kind, value, action }),
+  setRuleEnabled: (id, enabled) => invoke<RuleView[]>("rule_set_enabled", { id, enabled }),
+  removeRule: (id) => invoke<RuleView[]>("rule_remove", { id }),
   logs: (limit) => invoke<LogEntry[]>("logs_tail", { limit }),
   paths: () => invoke<Record<string, string>>("paths"),
 };
@@ -314,6 +323,7 @@ interface MockState {
   totalDown: number;
   totalUp: number;
   cores: CoreStatus[];
+  rules: RuleView[];
   logs: LogEntry[];
   seq: number;
   lastTick: number;
@@ -357,6 +367,10 @@ function seedState(): MockState {
         protocols: ["vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic"],
       },
     ],
+    rules: [
+      { id: "r1", kind: "domain-suffix", value: "company.internal", action: "direct", enabled: true, position: 0 },
+      { id: "r2", kind: "geosite", value: "category-ads-all", action: "block", enabled: true, position: 1 },
+    ],
     logs: [
       { seq: 1, ts: Date.now() - 90_000, level: "info", target: "app", message: "v2rayR 0.1.0 预览环境已就绪" },
       { seq: 2, ts: Date.now() - 60_000, level: "info", target: "cores", message: "检测到 sing-box 1.11.3 / Xray 1.8.24" },
@@ -378,6 +392,7 @@ function loadState(): MockState {
       ...seed,
       ...parsed,
       settings: parsed.settings ?? seed.settings,
+      rules: parsed.rules ?? seed.rules,
       cores: seed.cores,
       logs: parsed.logs ?? seed.logs,
       lastTick: Date.now(),
@@ -457,6 +472,11 @@ function snapshot(): AppSnapshot {
     state.connection.startedAt = iso();
     state.connection.takeoverApplied = state.connection.mode !== "manual";
   }
+  if (state.connection.phase === "disconnected" || state.connection.phase === "failed") {
+    // Nothing is listening; showing a port here would be a stale readout.
+    state.connection.inboundPort = undefined;
+    state.connection.apiPort = undefined;
+  }
   const active = state.nodes.find((node) => node.id === state.connection.profileId);
   return {
     version: {
@@ -508,7 +528,7 @@ const mockBackend: Backend = {
       profileId: node.id,
       profileRemark: node.remark,
       core: node.core,
-      inboundPort: mode === "system-proxy" ? 10808 : 10814,
+      inboundPort: mode === "tun" ? 10814 : 10808,
       apiPort: 10812,
       takeoverApplied: false,
     };
@@ -535,7 +555,7 @@ const mockBackend: Backend = {
       ...state.connection,
       phase: "connected",
       startedAt: iso(),
-      takeoverApplied: mode === "system-proxy",
+      takeoverApplied: mode !== "manual",
     };
     node.lastUsedAt = iso();
     log("info", "session", `已连接 ${node.remark}（${node.core}）`);
@@ -567,7 +587,7 @@ const mockBackend: Backend = {
     }
     state.connection = { ...state.connection, phase: "connecting", profileId: node.id, profileRemark: node.remark, core: node.core };
     await wait(600);
-    state.connection = { ...state.connection, phase: "connected", startedAt: iso(), takeoverApplied: state.connection.mode === "system-proxy" };
+    state.connection = { ...state.connection, phase: "connected", startedAt: iso(), takeoverApplied: state.connection.mode !== "manual" };
     log("info", "session", `已切换到 ${node.remark}`);
     persist();
     return snapshot();
@@ -585,11 +605,23 @@ const mockBackend: Backend = {
     return snapshot();
   },
   setMode: async (mode) => {
-    state.connection = { ...state.connection, mode };
+    if (state.connection.phase === "connected") {
+      state.connection = { ...state.connection, mode };
+    } else {
+      state.connection = {
+        ...state.connection,
+        mode,
+        phase: "disconnected",
+        inboundPort: undefined,
+        apiPort: undefined,
+        takeoverError: undefined,
+        error: undefined,
+      };
+    }
     if (state.connection.phase === "connected") {
       state.connection = { ...state.connection, phase: "connecting" };
       await wait(520);
-      state.connection = { ...state.connection, phase: "connected", takeoverApplied: mode === "system-proxy" };
+      state.connection = { ...state.connection, phase: "connected", takeoverApplied: mode !== "manual" };
     }
     persist();
     return snapshot();
@@ -829,6 +861,38 @@ const mockBackend: Backend = {
       retryable: false,
     };
   },
+  rules: async () => {
+    await wait(20);
+    return state.rules.map((rule) => ({ ...rule }));
+  },
+  addRule: async (kind, value, action) => {
+    await wait(60);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw { code: "invalid_value", key: "error.invalid_value", detail: "规则内容不能为空", retryable: false };
+    }
+    state.rules.push({ id: `r${Date.now()}`, kind, value: trimmed, action, enabled: true, position: state.rules.length });
+    log("info", "rules", `新增规则 ${kind} ${trimmed}`);
+    persist();
+    return state.rules.map((rule) => ({ ...rule }));
+  },
+  setRuleEnabled: async (id, enabled) => {
+    await wait(40);
+    const rule = state.rules.find((item) => item.id === id);
+    if (!rule) throw { code: "not_found", key: "error.not_found", retryable: false };
+    rule.enabled = enabled;
+    persist();
+    return state.rules.map((item) => ({ ...item }));
+  },
+  removeRule: async (id) => {
+    await wait(40);
+    const index = state.rules.findIndex((item) => item.id === id);
+    if (index < 0) throw { code: "not_found", key: "error.not_found", retryable: false };
+    state.rules.splice(index, 1);
+    persist();
+    return state.rules.map((rule) => ({ ...rule }));
+  },
+
   logs: async (limit) => state.logs.slice(-limit),
   paths: async () => ({
     root: "~/Library/Application Support/v2rayR",

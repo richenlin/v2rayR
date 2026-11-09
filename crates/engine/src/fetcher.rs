@@ -85,25 +85,73 @@ impl Fetcher {
                 profiles: parse_sip008(value)?,
                 ..ImportPreview::default()
             },
-            Payload::Clash { .. } => {
-                return Err(EngineError::UnsupportedPayload(
-                    "Clash 订阅（YAML）暂不支持导入；请改用链接或 base64 订阅".to_owned(),
-                ));
+            Payload::Clash { yaml } => {
+                let imported = v2rayr_domain::clash::parse_clash_config(yaml).map_err(|error| {
+                    EngineError::UnsupportedPayload(format!(
+                        "Clash 订阅解析失败: {}",
+                        error.code().as_str()
+                    ))
+                })?;
+                ImportPreview {
+                    failures: imported
+                        .skipped
+                        .into_iter()
+                        .map(|reason| v2rayr_domain::LinkFailure {
+                            source: "clash".to_owned(),
+                            error: v2rayr_domain::DomainError::new(
+                                v2rayr_domain::ErrorCode::UnsupportedProtocol,
+                            )
+                            .with_detail(reason),
+                        })
+                        .collect(),
+                    profiles: imported.profiles,
+                    ..ImportPreview::default()
+                }
             }
-            Payload::SingBox(_) => {
-                return Err(EngineError::UnsupportedPayload(
-                    "sing-box JSON 订阅暂不支持导入；请改用链接或 base64 订阅".to_owned(),
-                ));
+            Payload::SingBox(value) => {
+                let imported = v2rayr_domain::singbox_import::parse_singbox_config(value).map_err(
+                    |error| {
+                        EngineError::UnsupportedPayload(format!(
+                            "sing-box 订阅解析失败: {}",
+                            error.code().as_str()
+                        ))
+                    },
+                )?;
+                ImportPreview {
+                    failures: imported
+                        .skipped
+                        .into_iter()
+                        .map(|reason| v2rayr_domain::LinkFailure {
+                            source: "sing-box".to_owned(),
+                            error: v2rayr_domain::DomainError::new(
+                                v2rayr_domain::ErrorCode::UnsupportedProtocol,
+                            )
+                            .with_detail(reason),
+                        })
+                        .collect(),
+                    profiles: imported.profiles,
+                    ..ImportPreview::default()
+                }
             }
             Payload::Unknown { reason } => {
                 return Err(EngineError::UnsupportedPayload(reason.clone()));
             }
         };
 
-        if preview.profiles.is_empty() && preview.failures.is_empty() {
-            return Err(EngineError::UnsupportedPayload(
-                "订阅里没有可识别的节点".to_owned(),
-            ));
+        // Refusing an empty import is load bearing: a refresh merges the incoming
+        // nodes into the stored ones, and an empty "successful" refresh would
+        // silently delete every non-favourite node of the subscription.
+        if preview.profiles.is_empty() {
+            let detail = if preview.failures.is_empty() {
+                "订阅里没有可识别的节点".to_owned()
+            } else {
+                format!(
+                    "订阅里没有可导入的节点（{} 条被跳过，例如：{}）",
+                    preview.failures.len(),
+                    preview.failures[0].error.detail().unwrap_or("原因未知")
+                )
+            };
+            return Err(EngineError::UnsupportedPayload(detail));
         }
 
         Ok(FetchedSubscription {
@@ -262,15 +310,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clash_yaml_is_refused_with_an_explanation() {
-        let body = "proxies:\n  - name: a\n    type: ss\nrules:\n  - MATCH,DIRECT\n";
+    async fn clash_yaml_is_converted_to_profiles() {
+        let body = "proxies:\n  - name: Tokyo\n    type: ss\n    server: a.example.com\n    port: 8388\n    cipher: aes-256-gcm\n    password: pw\nrules:\n  - MATCH,DIRECT\n";
+        let port = spawn_server(body, "").await;
+        let fetched = fetcher()
+            .fetch(&format!("http://127.0.0.1:{port}/sub"))
+            .await
+            .expect("fetch");
+        assert_eq!(fetched.format, SubscriptionFormat::Clash);
+        assert_eq!(fetched.preview.profiles.len(), 1);
+        assert_eq!(fetched.preview.profiles[0].remark, "Tokyo");
+    }
+
+    #[tokio::test]
+    async fn singbox_json_is_converted_to_profiles() {
+        let body = r#"{"outbounds":[{"type":"trojan","tag":"Seoul","server":"b.example.com","server_port":443,"password":"pw","tls":{"enabled":true,"server_name":"b.example.com"}}]}"#;
+        let port = spawn_server(body, "").await;
+        let fetched = fetcher()
+            .fetch(&format!("http://127.0.0.1:{port}/sub"))
+            .await
+            .expect("fetch");
+        assert_eq!(fetched.format, SubscriptionFormat::SingBox);
+        assert_eq!(fetched.preview.profiles.len(), 1);
+        assert_eq!(fetched.preview.profiles[0].remark, "Seoul");
+    }
+
+    #[tokio::test]
+    async fn a_payload_with_no_importable_nodes_is_refused() {
+        let body =
+            "proxies:\n  - name: a\n    type: snell\n    server: a.example.com\n    port: 443\n";
         let port = spawn_server(body, "").await;
         let error = fetcher()
             .fetch(&format!("http://127.0.0.1:{port}/sub"))
             .await
             .expect_err("must refuse");
         assert!(matches!(error, EngineError::UnsupportedPayload(_)));
-        assert!(error.to_string().contains("Clash"));
+        assert!(error.to_string().contains("跳过"), "{error}");
     }
 
     #[tokio::test]

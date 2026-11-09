@@ -186,3 +186,17 @@ mod tests {
         );
     }
 }
+
+/// One custom routing rule, as shown in the settings page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleView {
+    pub id: Uuid,
+    /// `domain` | `domain-suffix` | `ip-cidr` | `process` | `geoip` | `geosite`.
+    pub kind: String,
+    pub value: String,
+    /// `proxy` | `direct` | `block`.
+    pub action: String,
+    pub enabled: bool,
+    pub position: i32,
+}

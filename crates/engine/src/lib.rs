@@ -7,6 +7,7 @@
 pub mod check;
 pub mod clash;
 pub mod cores;
+pub mod dist;
 pub mod fetcher;
 pub mod latency;
 pub mod logs;
@@ -17,6 +18,7 @@ use v2rayr_domain::{CoreKind, ErrorCode};
 pub use check::{CheckOutcome, check_config};
 pub use clash::{ClashClient, ClashSample};
 pub use cores::{CoreBinaries, CoreProbe};
+pub use dist::{CoreRelease, default_release, download_core};
 pub use fetcher::{FetchedSubscription, Fetcher};
 pub use latency::{LatencyProbe, LatencyTarget, tcp_latency};
 pub use process::{KernelProcess, LaunchSpec};

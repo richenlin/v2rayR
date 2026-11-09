@@ -28,7 +28,7 @@ pub use snapshot::{
 };
 pub use views::{
     CoreStatus, ImportFailure, ImportReport, LatencyMethod, LatencyResult, LatencyView, NodeView,
-    QuotaView, SessionRequest, SubscriptionView, VersionInfo,
+    QuotaView, RuleView, SessionRequest, SubscriptionView, VersionInfo,
 };
 
 /// Bumped whenever a field is removed or its meaning changes. Additive changes
@@ -69,6 +69,11 @@ pub mod commands {
 
     pub const CORES_STATUS: &str = "cores_status";
     pub const CORES_INSTALL: &str = "cores_install";
+
+    pub const RULES_LIST: &str = "rules_list";
+    pub const RULE_ADD: &str = "rule_add";
+    pub const RULE_SET_ENABLED: &str = "rule_set_enabled";
+    pub const RULE_REMOVE: &str = "rule_remove";
 
     pub const LOGS_TAIL: &str = "logs_tail";
     pub const PATHS: &str = "app_paths";

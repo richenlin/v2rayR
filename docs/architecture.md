@@ -1,6 +1,6 @@
 # 架构说明
 
-这份文档记录代码里真正生效的约束；`docs/方案.md` 是设计与取舍的原始讨论，两者冲突时以实现为准，
+这份文档记录代码里真正生效的约束；`docs/solution.md` 是设计与取舍的原始讨论（设置项的取舍见 `docs/config.md`），两者冲突时以实现为准，
 并且应当在同一个 PR 里更新本文。
 
 ## 分层
@@ -48,15 +48,18 @@ Disconnected ──connect──► Connecting ──ok──► Connected ─�
 2. 内核可执行文件必须存在（`data/cores/<name>` 或 PATH），否则 `error.core_missing` 并带安装指引。
 3. **端口前置检查**：入站端口被占用 → `error.port_in_use`，能拿到占用者 PID 时写进 detail；
    控制端口（10812，TUN 时 10813）与 Xray 的额外 HTTP 端口同样检查。绝不静默换端口。
-4. TUN 需要特权 helper：当前构建直接返回 `error.permission_denied` 并说明替代方案。
+4. 接入方式分四种：系统代理、PAC（本机 10811 提供脚本，按域名绕行）、手动端口、TUN。
+   TUN 需要特权 helper：helper 不存在时直接返回 `error.permission_denied` 并说明替代方案。
 5. 读取启用中的自定义规则，组装 `SessionPlan`，`config::emit` 产出配置 JSON。
 6. `write_atomic` 写 `run/<core>-config.json`（临时文件 + fsync + rename + 目录 fsync），保证内核永远读不到半个文件。
 7. `check_config` 用内核自己的校验命令（`sing-box check` / `xray -test` / `mihomo -t`）过一遍；
    校验失败把内核输出的前几行拼进 `error.config_invalid`，**不启动**。
 8. `KernelProcess::launch` + `wait_ready(inbound_port, 20s)`：轮询进程存活与端口可连，
    超时带上日志尾部；启动失败时补 `error.core_failed`。
-9. `SystemProxy::apply`：先 `capture` 每个网络服务的当前状态，逐服务写入后把快照落盘到 `run/takeover.json`；
-   任一服务写入失败就用刚捕获的快照回滚。失败 → 停内核 → 返回 `error.takeover_failed`。
+9. `SystemProxy::apply`：先 `capture` 每个网络服务的当前状态（含 auto proxy URL），逐服务写入后把快照
+   落盘到 `run/takeover.json`；任一服务写入失败就用刚捕获的快照回滚。PAC 与手动代理互斥：应用 PAC 时先关掉
+   manual 的三个槽，应用 manual 时先关掉 auto url；恢复时两者都按快照还原。失败 → 停内核 → 返回
+   `error.takeover_failed`。
 10. 记录会话记忆（上次节点、上次模式、最近使用时间），广播 `session://changed`。
 
 断开是反向流程：按快照恢复代理（只恢复自己改过的字段）→ 删除快照 → `SIGTERM` 内核（5s 宽限后 kill）→
@@ -69,6 +72,7 @@ Disconnected ──connect──► Connecting ──ok──► Connected ─�
 | 本地混合入站（socks+http） | `settings.inbound.mixedPort`，0 表示 10808 |
 | Xray 的 HTTP 入站 | 入站端口 + 1 |
 | 控制 API（Clash API） | 10812，TUN 时 10813 |
+| PAC 脚本服务 | 10811，被占用时顺延到下一个空闲端口并在日志与设置里说明 |
 | 测速 | 内核无关的 TCP 连接，无额外端口 |
 
 UI 展示的端口一律来自 `ConnectionState`，不自行推算；内核实际端口可能因设置改变而不同。
@@ -118,3 +122,27 @@ UI 展示的端口一律来自 `ConnectionState`，不自行推算；内核实�
   `sealed-payloads` feature 打开后是 AES-256-GCM + 0600 密钥文件。威胁模型写得很明确：不防能读你文件的本地攻击者。
 - helper 的每个请求都要带 token（文件 0600、常量时间比较），不匹配直接退出 77；token 缺失即拒绝服务。
 - 默认只监听回环地址；开启「允许局域网设备接入」才绑定 `0.0.0.0`。
+
+## 分流规则
+
+规则存在 SQLite（`rules` 表），`kind ∈ {domain, domain-suffix, ip-cidr, process, geoip, geosite}`，
+`action ∈ {proxy, direct, block}`。编辑走 `App::{rules, add_rule, set_rule_enabled, remove_rule}`，
+校验在 app 层完成（类型解析、trim 后非空、≤256 字符、无换行），非法输入返回 `error.invalid_value`。
+规则在**下次 connect** 时被读进 `SessionPlan.rules`，因此保存规则不会打断正在运行的会话。
+
+发射器把规则排在私有网段直连之后、规则集之前：自定义规则优先于内置分流，符合「用户显式写的优先」。
+
+## 内核安装
+
+`engine::dist` 固定每个内核的版本、平台 slug 与下载地址，`download_core` 的顺序是：
+下载到 `.<name>.download` → 有 SHA-256 就校验（不匹配立即删除并报 `error.core_failed`，没有校验和时只警告）
+→ 解压到 `.<name>.unpack` → 找到同名可执行文件 → 复制成 `.<name>.new` 并 chmod 755 → rename 覆盖
+→ 跑一次 `version` 记日志。任何中间文件都以 `.` 开头，崩溃后不会留下一个看似可用的半截内核。
+
+## 单实例与托盘（桌面壳）
+
+- 单实例用 `run/v2rayr.lock`：文件里是 pid，第二次启动看到活着的 pid 就尝试激活已有窗口并退出；
+  看到死 pid 就接管锁。测试覆盖「第二个实例看到第一个」和「陈旧锁被接管」两种情况。
+- 托盘菜单：显示主窗口 / 重新连接（沿用上次模式）/ 断开连接 / 退出。左键点击托盘图标显示窗口。
+- `startup.closeToTray = true` 时关闭窗口只隐藏，代理继续运行；`startup.startMinimized = true` 时启动即隐藏。
+- 命令行里的分享链接与 `v2rayr://import/<base64>` 会排队导入，导入结果在下一次 snapshot 里出现。

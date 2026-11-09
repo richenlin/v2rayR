@@ -60,6 +60,9 @@ pub(crate) struct SessionRuntime {
     error: Option<Problem>,
     process: Option<KernelProcess>,
     snapshot: Option<TakeoverSnapshot>,
+    /// Kept alive for as long as the PAC takeover is active: dropping it stops
+    /// the loopback server and the system setting would point at nothing.
+    pac: Option<v2rayr_platform::PacServer>,
     pub total_down: u64,
     pub total_up: u64,
     samples: VecDeque<TrafficPoint>,
@@ -83,6 +86,7 @@ impl SessionRuntime {
             error: None,
             process: None,
             snapshot: None,
+            pac: None,
             total_down: 0,
             total_up: 0,
             samples: VecDeque::with_capacity(SAMPLE_CAPACITY),
@@ -348,6 +352,7 @@ impl App {
         let mut takeover_applied = true;
         let mut takeover_error = None;
         let mut snapshot = None;
+        let mut pac = None;
         match request.mode {
             TakeoverMode::Manual => {}
             TakeoverMode::SystemProxy => {
@@ -362,6 +367,51 @@ impl App {
                     Ok(applied) => {
                         self.persist_takeover(Some(&applied));
                         snapshot = Some(applied);
+                    }
+                    Err(error) => {
+                        takeover_applied = false;
+                        takeover_error = Some(error::from_platform(error));
+                    }
+                }
+            }
+            TakeoverMode::Pac => {
+                let mut bypass = v2rayr_platform::proxy::default_bypass();
+                bypass.extend(settings.bypass_extra());
+                if !settings.inbound.bypass_local {
+                    bypass.clear();
+                }
+                let script = v2rayr_platform::render_pac("127.0.0.1", inbound_port, &bypass);
+                // PAC port is 10811 unless something already holds it; we never
+                // silently reuse an occupied port, we just pick the next free one
+                // and say so in the log.
+                let preferred = 10811u16;
+                let port = if v2rayr_platform::Ports::probe(preferred)
+                    == v2rayr_platform::PortState::Free
+                {
+                    preferred
+                } else {
+                    let port =
+                        v2rayr_platform::Ports::find_free(preferred + 1).unwrap_or(preferred + 1);
+                    self.logs.warn(
+                        "session",
+                        format!("PAC 端口 {preferred} 已被占用，改用 {port}"),
+                    );
+                    port
+                };
+                match v2rayr_platform::PacServer::start(port, script) {
+                    Ok(server) => {
+                        let target = ProxyTarget::through_pac(server.url(), bypass);
+                        match self.proxy.apply(&target) {
+                            Ok(applied) => {
+                                self.persist_takeover(Some(&applied));
+                                snapshot = Some(applied);
+                                pac = Some(server);
+                            }
+                            Err(error) => {
+                                takeover_applied = false;
+                                takeover_error = Some(error::from_platform(error));
+                            }
+                        }
                     }
                     Err(error) => {
                         takeover_applied = false;
@@ -402,6 +452,7 @@ impl App {
             session.error = None;
             session.process = Some(process);
             session.snapshot = snapshot;
+            session.pac = pac;
             session.total_down = total_down;
             session.total_up = total_up;
             session.samples.clear();
@@ -426,15 +477,16 @@ impl App {
     }
 
     async fn cleanup_after_failure(&self) {
-        let (process, snapshot) = {
+        let (process, snapshot, pac) = {
             let mut session = self.session.lock().expect("session");
             let process = session.process.take();
             let snapshot = session.snapshot.take();
+            let pac = session.pac.take();
             session.inbound_port = None;
             session.api_port = None;
             session.started_at = None;
             session.takeover_applied = false;
-            (process, snapshot)
+            (process, snapshot, pac)
         };
         if let Some(snapshot) = snapshot {
             if let Err(error) = self.proxy.restore(&snapshot) {
@@ -443,6 +495,9 @@ impl App {
             }
         }
         self.persist_takeover(None);
+        // Stop serving the PAC script only after the OS setting is restored,
+        // otherwise a browser may fetch the URL while it is already gone.
+        drop(pac);
         if let Some(mut process) = process {
             let _ = process.stop(std::time::Duration::from_secs(3)).await;
         }
@@ -453,16 +508,17 @@ impl App {
         self.set_phase(ConnectionPhase::Disconnecting, None);
         self.emit_session();
 
-        let (process, snapshot) = {
+        let (process, snapshot, pac) = {
             let mut session = self.session.lock().expect("session");
             let process = session.process.take();
             let snapshot = session.snapshot.take();
+            let pac = session.pac.take();
             session.phase = ConnectionPhase::Disconnecting;
             session.inbound_port = None;
             session.api_port = None;
             session.takeover_applied = false;
             session.samples.clear();
-            (process, snapshot)
+            (process, snapshot, pac)
         };
 
         if let Some(snapshot) = &snapshot {
@@ -472,6 +528,9 @@ impl App {
             }
         }
         self.persist_takeover(None);
+        // Stop serving the PAC script only after the OS setting is restored,
+        // otherwise a browser may fetch the URL while it is already gone.
+        drop(pac);
         if let Some(mut process) = process {
             if let Err(error) = process.stop(std::time::Duration::from_secs(5)).await {
                 self.logs.warn("session", format!("停止内核失败: {error}"));
@@ -608,6 +667,7 @@ impl App {
 fn mode_str(mode: TakeoverMode) -> &'static str {
     match mode {
         TakeoverMode::SystemProxy => "system-proxy",
+        TakeoverMode::Pac => "pac",
         TakeoverMode::Tun => "tun",
         TakeoverMode::Manual => "manual",
     }

@@ -13,6 +13,7 @@ import type {
   AppSnapshot,
   LatencyResult,
   Problem,
+  RuleView,
   SettingsPatch,
   TakeoverMode,
   RoutingPolicy,
@@ -42,6 +43,7 @@ interface State {
   nodeQuery: string;
   nodeScope: "all" | "favorites";
   nodeProtocol: string;
+  rules: RuleView[];
 
   boot: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -71,6 +73,10 @@ interface State {
   setSubscriptionEnabled: (id: string, enabled: boolean) => Promise<void>;
 
   saveSettings: (patches: SettingsPatch[]) => Promise<boolean>;
+  loadRules: () => Promise<void>;
+  addRule: (kind: string, value: string, action: string) => Promise<boolean>;
+  toggleRule: (id: string, enabled: boolean) => Promise<void>;
+  removeRule: (id: string) => Promise<void>;
   probeCores: () => Promise<void>;
   installCore: (kind: string) => Promise<void>;
   resetSettings: () => Promise<void>;
@@ -102,6 +108,7 @@ export const useStore = create<State>((set, get) => ({
   nodeQuery: "",
   nodeScope: "all",
   nodeProtocol: "all",
+  rules: [],
 
   boot: async () => {
     try {
@@ -118,6 +125,7 @@ export const useStore = create<State>((set, get) => ({
       });
       applyDocumentTheme(get().themeMode);
       applyDocumentLang(get().lang);
+      void get().loadRules();
     } catch (error) {
       set({ loading: false, bootError: String(error) });
     }
@@ -421,6 +429,43 @@ export const useStore = create<State>((set, get) => ({
       return false;
     } finally {
       set({ busy: null });
+    }
+  },
+
+  loadRules: async () => {
+    try {
+      set({ rules: await api.rules() });
+    } catch {
+      // Rules are secondary to the snapshot; a failure surfaces on the next edit.
+    }
+  },
+
+  addRule: async (kind, value, action) => {
+    try {
+      set({ rules: await api.addRule(kind, value, action) });
+      return true;
+    } catch (error) {
+      const problem = toProblem(error) as Problem;
+      get().toast("danger", translate(get().lang, "settings.rules.add"), problemTextSafe(get().lang, problem));
+      return false;
+    }
+  },
+
+  toggleRule: async (id, enabled) => {
+    try {
+      set({ rules: await api.setRuleEnabled(id, enabled) });
+    } catch (error) {
+      const problem = toProblem(error) as Problem;
+      get().toast("danger", translate(get().lang, "settings.rules.title"), problemTextSafe(get().lang, problem));
+    }
+  },
+
+  removeRule: async (id) => {
+    try {
+      set({ rules: await api.removeRule(id) });
+    } catch (error) {
+      const problem = toProblem(error) as Problem;
+      get().toast("danger", translate(get().lang, "settings.rules.title"), problemTextSafe(get().lang, problem));
     }
   },
 

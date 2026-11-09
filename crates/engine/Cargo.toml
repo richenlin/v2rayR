@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+sha2.workspace = true
+hex.workspace = true
 anyhow = { workspace = true, optional = true }
 chrono.workspace = true
 reqwest.workspace = true

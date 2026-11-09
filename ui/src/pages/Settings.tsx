@@ -13,6 +13,7 @@ import type {
 } from "../lib/types";
 import { resetPreviewData } from "../lib/api";
 import { isPreview } from "../lib/api";
+import type { RuleView } from "../lib/types";
 
 type Group = SettingsGroupId | "diagnostics";
 
@@ -33,6 +34,94 @@ interface GroupDraft {
   subscription: SubscriptionSettings;
   appearance: AppearanceSettings;
   advanced: AdvancedSettings;
+}
+
+
+const RULE_KINDS = ["domain", "domain-suffix", "ip-cidr", "process", "geoip", "geosite"] as const;
+const RULE_ACTIONS = ["direct", "proxy", "block"] as const;
+
+function RulesEditor() {
+  const t = useT();
+  const rules = useStore((state) => state.rules);
+  const addRule = useStore((state) => state.addRule);
+  const toggleRule = useStore((state) => state.toggleRule);
+  const removeRule = useStore((state) => state.removeRule);
+  const [kind, setKind] = useState<string>("domain-suffix");
+  const [value, setValue] = useState("");
+  const [action, setAction] = useState<string>("direct");
+
+  const submit = async () => {
+    const ok = await addRule(kind, value, action);
+    if (ok) setValue("");
+  };
+
+  return (
+    <div className="rules-block">
+      <div className="rules-head">
+        <div>
+          <p className="field-label">{t("settings.rules.title")}</p>
+          <p className="field-hint">{t("settings.rules.hint")}</p>
+        </div>
+        <span className="badge" data-tone="active">
+          {rules.length}
+        </span>
+      </div>
+      <div className="rules-add">
+        <Select
+          label={t("settings.rules.kind")}
+          value={kind}
+          onChange={setKind}
+          options={RULE_KINDS.map((item) => ({
+            value: item,
+            label: t(`settings.rules.kind.${item.replace(/-([a-z])/g, (_, c) => c.toUpperCase())}`),
+          }))}
+        />
+        <input
+          className="control control-mono"
+          aria-label={t("settings.rules.value")}
+          placeholder={kind === "ip-cidr" ? "10.0.0.0/8" : "example.com"}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void submit();
+          }}
+        />
+        <Select
+          label={t("settings.rules.action")}
+          value={action}
+          onChange={setAction}
+          options={RULE_ACTIONS.map((item) => ({ value: item, label: t(`settings.rules.action.${item}`) }))}
+        />
+        <button type="button" className="btn btn-outline btn-sm" onClick={() => void submit()} disabled={!value.trim()}>
+          {t("settings.rules.add")}
+        </button>
+      </div>
+      {rules.length === 0 ? (
+        <p className="field-hint">{t("settings.rules.empty")}</p>
+      ) : (
+        <ul className="rules-list">
+          {rules.map((rule: RuleView) => (
+            <li key={rule.id} className="rules-row" data-disabled={!rule.enabled || undefined}>
+              <Toggle checked={rule.enabled} label={t("settings.rules.enabled")} onChange={(checked) => void toggleRule(rule.id, checked)} />
+              <span className="mono rules-kind">{rule.kind}</span>
+              <span className="mono rules-value">{rule.value}</span>
+              <span className="badge" data-tone={rule.action === "block" ? "danger" : rule.action === "direct" ? "ok" : "active"}>
+                {t(`settings.rules.action.${rule.action}`)}
+              </span>
+              <button
+                type="button"
+                className="btn btn-quiet btn-sm rules-remove"
+                aria-label={t("settings.rules.remove")}
+                onClick={() => void removeRule(rule.id)}
+              >
+                <Icon name="trash" size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 export function SettingsPage() {
@@ -87,7 +176,7 @@ export function SettingsPage() {
       [
         hit(["settings.launchAtLogin", "settings.startMinimized", "settings.closeToTray", "settings.showTrayIcon", "settings.singleInstance"]) ? "startup" : null,
         hit(["settings.mixedPort", "settings.allowLan", "settings.bypassLocal", "settings.bypassExtra", "settings.tunEnabled"]) ? "inbound" : null,
-        hit(["settings.policy", "settings.ruleSet", "settings.blockAds", "settings.dnsStrategy", "settings.dnsServers", "settings.fakeIp"]) ? "routing" : null,
+        hit(["settings.policy", "settings.ruleSet", "settings.blockAds", "settings.dnsStrategy", "settings.dnsServers", "settings.fakeIp", "settings.rules"]) ? "routing" : null,
         hit(["settings.interval", "settings.updateOnStart", "settings.concurrency", "settings.timeout", "settings.userAgent", "settings.keepRemoved"]) ? "subscription" : null,
         hit(["settings.theme", "settings.language", "settings.compact", "settings.reduceMotion"]) ? "appearance" : null,
         hit(["settings.coreOverride", "settings.logLevel", "settings.tunMtu", "settings.sniffing", "settings.tcpFastOpen", "settings.mux", "settings.muxConcurrency"]) ? "advanced" : null,
@@ -244,6 +333,7 @@ export function SettingsPage() {
                 <Toggle checked={value.fakeIp} label={t("settings.fakeIp")} onChange={(checked) => patch("routing", { fakeIp: checked })} />
               </Field>
             ) : null}
+            {matches("settings.rules", "settings.rules.hint") ? <RulesEditor /> : null}
           </>
         );
       }

@@ -851,7 +851,7 @@ i18next 按模块拆分，后端只发稳定的错误码和安全参数。首批
 
 ### 9.8 设置项取舍
 
-[上游设置对照与推荐默认值](设置项取舍.md)记录每组配置保留、收起或不提供控件的理由。原型保留全局搜索、按组草稿与保存、撤销及条件字段。连接页负责当前接入方式和分流模式；设置只保留持久偏好，不重复提供两个运行态开关。
+[上游设置对照与推荐默认值](config.md)记录每组配置保留、收起或不提供控件的理由。原型保留全局搜索、按组草稿与保存、撤销及条件字段。连接页负责当前接入方式和分流模式；设置只保留持久偏好，不重复提供两个运行态开关。
 
 ![代理接入设置原型](images/settings-v03.png)
 
@@ -1041,7 +1041,7 @@ v2rayR/
 ├── crates/{domain,store,config,engine,platform,ipc,helper}/src/lib.rs
 ├── ui/src/{App.tsx,pages/,components/,stores/,lib/,i18n/}
 ├── resources/{rules/,icons/,pac/,licenses/}
-├── docs/{architecture.md,adr/,协议字段表.md,方案.md}
+├── docs/{architecture.md,config.md,development.md,solution.md,adr/}
 └── .github/workflows/{ci.yml,release.yml}
 ```
 

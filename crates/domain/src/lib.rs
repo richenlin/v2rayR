@@ -6,12 +6,14 @@
 //! on the enum instead of probing dozens of optional string columns.
 
 pub mod base64;
+pub mod clash;
 pub mod error;
 pub mod filter;
 pub mod fingerprint;
 pub mod merge;
 pub mod model;
 pub mod sharelink;
+pub mod singbox_import;
 pub mod subscription;
 
 pub use error::{DomainError, ErrorCode};

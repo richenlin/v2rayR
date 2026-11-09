@@ -13,7 +13,7 @@ export type ConnectionPhase =
   | "disconnecting"
   | "failed";
 
-export type TakeoverMode = "system-proxy" | "tun" | "manual";
+export type TakeoverMode = "system-proxy" | "pac" | "tun" | "manual";
 export type RoutingPolicy = "rule" | "global" | "direct";
 export type CoreKind = "sing-box" | "xray" | "mihomo";
 export type Theme = "system" | "light" | "dark";
@@ -253,3 +253,13 @@ export const emptyTraffic: TrafficView = {
   connections: 0,
   samples: [],
 };
+
+/** One custom routing rule (mirrors `v2rayr_ipc::RuleView`). */
+export interface RuleView {
+  id: string;
+  kind: "domain" | "domain-suffix" | "ip-cidr" | "process" | "geoip" | "geosite" | string;
+  value: string;
+  action: "proxy" | "direct" | "block" | string;
+  enabled: boolean;
+  position: number;
+}
