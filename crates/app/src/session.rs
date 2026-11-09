@@ -33,6 +33,9 @@ use crate::App;
 use crate::error;
 use crate::settings::write_atomic;
 
+/// One sentence, in both failure paths, that says what is actually missing.
+const TUN_DETAIL: &str = "TUN 需要以 root 运行的 helper 创建虚拟网卡；当前 helper 只处理系统代理与自启动，TUN 尚未接通。可改用系统代理或 PAC。";
+
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const SAMPLE_CAPACITY: usize = 60;
 
@@ -226,13 +229,12 @@ impl App {
             return Err(problem);
         }
 
-        let tun = settings.inbound.tun_enabled;
+        // TUN is requested either by the access mode or by the persistent
+        // setting; both mean the same thing, so refuse once with one reason.
+        let tun = settings.inbound.tun_enabled || request.mode == TakeoverMode::Tun;
         if tun {
-            return Err(
-                Problem::new(ErrorCode::PermissionDenied.as_str(), false).with_detail(
-                    "TUN 模式需要特权 helper，当前构建未启用；请使用系统代理或手动模式".to_owned(),
-                ),
-            );
+            return Err(Problem::new(ErrorCode::PermissionDenied.as_str(), false)
+                .with_detail(TUN_DETAIL.to_owned()));
         }
         // The control API needs a free port of its own; the documented default is
         // 10812, drifting by one when TUN is on.
@@ -423,7 +425,7 @@ impl App {
                 takeover_applied = false;
                 takeover_error = Some(
                     Problem::new(ErrorCode::PermissionDenied.as_str(), false)
-                        .with_detail("TUN 需要特权 helper，当前构建未启用".to_owned()),
+                        .with_detail(TUN_DETAIL.to_owned()),
                 );
             }
         }

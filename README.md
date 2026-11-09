@@ -129,7 +129,8 @@ CI 与本地一致：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) �
 
 - 桌面壳（`apps/desktop`）不在 workspace 内，需要 `tauri-cli` 与网络代理拉取依赖；CI 里有独立的 build job。
 - Clash / sing-box 原生配置只支持常见出站类型；不支持的协议、插件与传输方式会被跳过并给出原因。
-- TUN 模式需要特权 helper；helper 已实现并有测试，但「一键安装 helper」的桌面端流程尚未接上，因此 TUN 会返回 `permission_denied` 并说明原因。
+- TUN 模式需要以 root 运行的 helper 创建虚拟网卡；当前 helper 只覆盖系统代理与自启动，
+  因此 TUN 会如实返回 `permission_denied` 并建议改用系统代理或 PAC，而不是假装已连接。
 - 规则集（`*.srs`）不随仓库分发，放入 `data/rules/` 后才会被引用；否则规则模式只用内置私有网段与自定义规则。
 - 开机自启目前只写 LaunchAgent，没有图形化引导；托盘菜单已在桌面壳内实现，但本机无法编译验证。
 - 自动更新、备份/WebDAV 属于发布期能力，本仓库未实现。

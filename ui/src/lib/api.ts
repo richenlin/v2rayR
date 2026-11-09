@@ -543,7 +543,7 @@ const mockBackend: Backend = {
         error: {
           code: "permission_denied",
           key: "error.permission_denied",
-          detail: "TUN 模式需要特权 helper（预览模拟）",
+          detail: "TUN 需要以 root 运行的 helper 创建虚拟网卡；预览环境未接通，可改用系统代理或 PAC。",
           retryable: false,
         },
       };
