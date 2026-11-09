@@ -80,6 +80,8 @@ V2RAYR_HOME=/tmp/v2rayr ./target/debug/v2rayr status
 ./target/debug/v2rayr import 'vless://...'
 ./target/debug/v2rayr connect 'Tokyo' --mode manual   # 连上、验证、立刻断开
 ./target/debug/v2rayr run 'Tokyo' --mode manual       # 保持连接，Ctrl-C 退出
+./target/debug/v2rayr install xray                    # 下载固定版本内核（校验 SHA256 + geoip/geosite）
+./target/debug/v2rayr test                            # 只测 TCP 延迟，不走代理
 
 # 3. 界面（离线预览：mock 后端，不写本机配置）
 cd ui && pnpm install && pnpm dev     # http://localhost:1420
@@ -123,7 +125,7 @@ logs/                     内核日志与应用日志
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 262 个测试
+cargo test --workspace                     # 265 个测试
 cd ui && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite build
 ```
 

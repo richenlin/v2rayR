@@ -339,7 +339,10 @@ impl App {
             format!("{} 已安装到 {}", kind.as_str(), path.display()),
         );
         self.rescan_cores();
-        self.cores_status()
+        // Probe the fresh binary so the caller gets a version instead of `None`;
+        // otherwise the UI shows a blank version until the next rescan.
+        self.refresh_core_versions()
+            .await
             .into_iter()
             .find(|status| status.kind == kind)
             .ok_or_else(|| {

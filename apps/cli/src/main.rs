@@ -17,6 +17,7 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 use v2rayr_app::text;
 use v2rayr_app::{App, AppOptions, ConnectionRequest, ImportRequest, Settings};
+use v2rayr_domain::CoreKind;
 use v2rayr_ipc::{
     ConnectionPhase, LatencyMethod, Problem, RoutingPolicy, SettingsGroupId, SettingsPatch,
     TakeoverMode,
@@ -79,6 +80,15 @@ enum Command {
     Export { node: String },
     /// Kernel discovery and versions.
     Cores,
+    /// Download a kernel release into `data/cores` (verifies SHA-256 when given).
+    Install {
+        /// sing-box | xray | mihomo
+        kind: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        sha256: Option<String>,
+    },
     /// Recent log lines from this process.
     Logs {
         #[arg(default_value_t = 50)]
@@ -139,6 +149,22 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Cores => cores(&app).await,
+        Command::Install { kind, url, sha256 } => {
+            let kind = CoreKind::parse(&kind).ok_or_else(|| {
+                anyhow::anyhow!("未知内核：{kind}（可选 sing-box / xray / mihomo）")
+            })?;
+            let status = app
+                .install_core(kind, url, sha256)
+                .await
+                .map_err(problem_to_anyhow)?;
+            println!(
+                "已安装 {} {}（{}）",
+                status.kind.as_str(),
+                status.version.unwrap_or_default(),
+                status.path.unwrap_or_default()
+            );
+            Ok(())
+        }
         Command::Logs { limit } => {
             for entry in app.tail_logs(limit) {
                 println!(
