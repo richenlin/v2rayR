@@ -19,3 +19,6 @@ apps/desktop/gen
 
 # Preview artefacts
 screenshots/
+
+# Tooling caches
+.memsearch/
