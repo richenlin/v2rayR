@@ -67,7 +67,12 @@ pub fn choose_core(
         };
     }
 
-    if let Protocol::Vless { .. } = &profile.protocol {
+    if let Protocol::Vless { encryption, .. } = &profile.protocol {
+        // Post-quantum VLESS encryption is an Xray 25.x feature; sing-box does
+        // not understand the field and would fail at startup.
+        if encryption.is_some() {
+            return xray_supports(profile).map(|_| CoreKind::Xray);
+        }
         if matches!(
             profile.transport,
             Transport::Xhttp { .. } | Transport::Mkcp { .. }
@@ -113,6 +118,13 @@ fn singbox_supports(profile: &Profile) -> Result<(), ConfigError> {
             reason,
         })
     };
+    if let Protocol::Vless {
+        encryption: Some(_),
+        ..
+    } = &profile.protocol
+    {
+        return fail("VLESS encryption needs Xray".to_owned());
+    }
     match &profile.protocol {
         Protocol::Vmess { .. }
         | Protocol::Vless { .. }
@@ -229,6 +241,20 @@ mod tests {
             flow: None,
             encryption: None,
         }
+    }
+
+    #[test]
+    fn vless_encryption_is_routed_to_xray() {
+        let node = profile(
+            Protocol::Vless {
+                id: uuid::Uuid::nil(),
+                flow: None,
+                encryption: Some("mlkem768x25519plus.native.0rtt.key".to_owned()),
+            },
+            Transport::Raw,
+        );
+        assert_eq!(choose_core(&node, None).expect("core"), CoreKind::Xray);
+        assert!(!supported(CoreKind::SingBox, &node));
     }
 
     #[test]

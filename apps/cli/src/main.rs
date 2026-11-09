@@ -18,7 +18,8 @@ use uuid::Uuid;
 use v2rayr_app::text;
 use v2rayr_app::{App, AppOptions, ConnectionRequest, ImportRequest, Settings};
 use v2rayr_ipc::{
-    ConnectionPhase, Problem, RoutingPolicy, SettingsGroupId, SettingsPatch, TakeoverMode,
+    ConnectionPhase, LatencyMethod, Problem, RoutingPolicy, SettingsGroupId, SettingsPatch,
+    TakeoverMode,
 };
 use v2rayr_platform::AppPaths;
 
@@ -50,7 +51,11 @@ enum Command {
         #[command(subcommand)]
         action: SubCommand,
     },
-    /// Connect to a node (id or a unique remark fragment).
+    /// Connect once, verify the kernel is up, then disconnect.
+    ///
+    /// Useful as a self-check before switching to `run`, which keeps the
+    /// session alive. Exiting straight after `connect` would otherwise leave an
+    /// orphaned kernel holding the local port.
     Connect {
         node: String,
         #[arg(long, default_value = "manual")]
@@ -68,6 +73,8 @@ enum Command {
         #[arg(long, default_value = "rule")]
         policy: String,
     },
+    /// Measure TCP latency to one node, or to every node.
+    Test { node: Option<String> },
     /// Print the share link of a node.
     Export { node: String },
     /// Kernel discovery and versions.
@@ -123,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Run { node, mode, policy } => run(&app, &node, &mode, &policy).await,
+        Command::Test { node } => test(&app, node.as_deref()).await,
         Command::Export { node } => {
             let link = app
                 .share_link(resolve_node(&app, &node)?)
@@ -346,9 +354,14 @@ async fn connect(
                 println!("{}", serde_json::to_string_pretty(&snapshot)?);
             } else {
                 println!(
-                    "已连接：{}",
-                    snapshot.connection.profile_remark.unwrap_or_default()
+                    "已连接：{}（端口 {}，验证后自动断开）",
+                    snapshot.connection.profile_remark.unwrap_or_default(),
+                    snapshot.connection.inbound_port.unwrap_or_default()
                 );
+            }
+            app.disconnect().await.map_err(problem_to_anyhow)?;
+            if !json {
+                println!("已验证并断开");
             }
             Ok(())
         }
@@ -362,6 +375,44 @@ async fn connect(
             std::process::exit(2);
         }
     }
+}
+
+async fn test(app: &App, node: Option<&str>) -> anyhow::Result<()> {
+    let ids = match node {
+        Some(selector) => vec![resolve_node(app, selector)?],
+        None => app.nodes().into_iter().map(|node| node.id).collect(),
+    };
+    if ids.is_empty() {
+        println!("没有节点可测");
+        return Ok(());
+    }
+    let results = app.test_latency(&ids).await.map_err(problem_to_anyhow)?;
+    for result in results {
+        let remark = app
+            .node(result.id)
+            .map(|node| node.profile.remark)
+            .unwrap_or_else(|| result.id.to_string());
+        match (&result.latency, &result.error) {
+            (Some(latency), _) => {
+                let method = match latency.method {
+                    LatencyMethod::Tcp => "tcp",
+                    LatencyMethod::Http => "http",
+                    LatencyMethod::ThroughKernel => "kernel",
+                };
+                println!("{:<28} {:>5} ms  {}", remark, latency.ms, method);
+            }
+            (None, Some(problem)) => println!(
+                "{:<28}   失败  {}",
+                remark,
+                problem
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| problem.key.clone())
+            ),
+            (None, None) => println!("{:<28}   未知", remark),
+        }
+    }
+    Ok(())
 }
 
 async fn run(app: &App, node: &str, mode: &str, policy: &str) -> anyhow::Result<()> {

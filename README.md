@@ -78,7 +78,8 @@ cargo build --workspace
 # 2. 用一个临时数据目录试运行
 V2RAYR_HOME=/tmp/v2rayr ./target/debug/v2rayr status
 ./target/debug/v2rayr import 'vless://...'
-./target/debug/v2rayr connect 'Tokyo' --mode manual   # manual 不接管系统代理
+./target/debug/v2rayr connect 'Tokyo' --mode manual   # 连上、验证、立刻断开
+./target/debug/v2rayr run 'Tokyo' --mode manual       # 保持连接，Ctrl-C 退出
 
 # 3. 界面（离线预览：mock 后端，不写本机配置）
 cd ui && pnpm install && pnpm dev     # http://localhost:1420
@@ -88,8 +89,9 @@ cargo install tauri-cli --version "^2"
 cd apps/desktop && cargo tauri dev
 ```
 
-CLI 常用命令：`status`、`nodes`、`import <file|->`、`sub add/update/list`、`connect/disconnect/run`、`export`、
-`cores`、`logs`、`paths`。所有命令接受 `--json`。
+CLI 常用命令：`status`、`nodes`、`import <file|->`、`sub add/update/list`、`connect/disconnect/run`、`test`、
+`export`、`cores`、`logs`、`paths`。`connect` 是自检语义（连上随后断开），需要常驻连接用 `run`；
+`test` 不做代理，只测到节点的 TCP 延迟。所有命令接受 `--json`。
 
 ## 数据目录
 
@@ -110,6 +112,8 @@ logs/                     内核日志与应用日志
 | 场景 | 选择 | 说明 |
 | --- | --- | --- |
 | VLESS + xhttp / mKCP / QUIC | Xray | Xray 无混合入站，SOCKS 与 HTTP 分端口，系统代理写 SOCKS 端口 |
+| VLESS Encryption（`mlkem768x25519plus.*`） | Xray ≥ 25.9 | 目前只有 Xray 理解该字段；已实测 Reality + vision + 0-RTT 可连通 |
+| Reality / XTLS vision（普通 VLESS） | sing-box 或 Xray | 默认 sing-box，`coreOverride` 可切 Xray |
 | Hysteria2 / TUIC / AnyTLS / Naive | sing-box | |
 | Shadowsocks 2022 | sing-box | 旧版流式加密同样可用 |
 | 其余 | sing-box | 可用 `advanced.coreOverride` 显式指定，但仍校验内核能力 |
@@ -119,7 +123,7 @@ logs/                     内核日志与应用日志
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 241 个测试
+cargo test --workspace                     # 262 个测试
 cd ui && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite build
 ```
 

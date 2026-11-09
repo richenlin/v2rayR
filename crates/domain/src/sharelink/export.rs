@@ -18,9 +18,13 @@ pub fn export_share_link(profile: &Profile) -> Option<String> {
         Protocol::Vless {
             id,
             flow,
-            encryption: _,
+            encryption,
         } => {
             let mut params = common_query(profile);
+            params.push((
+                "encryption".into(),
+                encryption.clone().unwrap_or_else(|| "none".into()),
+            ));
             if let Some(flow) = flow {
                 params.push(("flow".into(), flow.as_str().to_owned()));
             }
