@@ -42,13 +42,17 @@ if [[ ! -e "$tauri" ]]; then
   exit 1
 fi
 
-args=()
+# macOS system Bash treats an empty array as unbound under set -u.
+args=(build)
 if (( bundle == 0 )); then
   args+=(--no-bundle)
 fi
+if (( ${#extra[@]} > 0 )); then
+  args+=("${extra[@]}")
+fi
 (
   cd apps/desktop
-  "$tauri" build "${args[@]}" "${extra[@]}"
+  "$tauri" "${args[@]}"
 )
 
 if (( bundle == 0 )); then
