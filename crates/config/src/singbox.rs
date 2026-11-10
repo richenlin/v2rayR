@@ -484,7 +484,8 @@ fn route(plan: &SessionPlan, application_rules: Option<Vec<Value>>) -> Value {
     }
 
     if plan.policy == RoutingMode::Rule {
-        let custom = application_rules.unwrap_or_else(|| plan.rules.iter().filter_map(custom_rule).collect());
+        let custom = application_rules
+            .unwrap_or_else(|| plan.rules.iter().filter_map(custom_rule).collect());
         let custom_start = rules.len();
         for rule_set in &plan.rule_sets {
             match rule_set.kind {
@@ -618,32 +619,52 @@ mod tests {
 
     #[test]
     fn application_ingress_preserves_first_match_and_isolates_the_mixed_port() {
-        use crate::application_ingress;
         use crate::CustomRule;
+        use crate::application_ingress;
         use v2rayr_domain::RuleApplication;
 
         let ports = std::env::var("V2RAYR_APPLICATION_PROBE_PORTS").ok();
-        let ports: Vec<u16> = ports.as_deref().unwrap_or("10808,10809,10812,10813,10814")
-            .split(',').map(|port| port.parse().unwrap()).collect();
-        let mut plan = plan(Profile::new("probe", "127.0.0.1", ports[4], Protocol::Socks {
-            username: None, password: None,
-        }));
+        let ports: Vec<u16> = ports
+            .as_deref()
+            .unwrap_or("10808,10809,10812,10813,10814")
+            .split(',')
+            .map(|port| port.parse().unwrap())
+            .collect();
+        let mut plan = plan(Profile::new(
+            "probe",
+            "127.0.0.1",
+            ports[4],
+            Protocol::Socks {
+                username: None,
+                password: None,
+            },
+        ));
         plan.inbound.port = ports[0];
         plan.inbound.http_port = Some(ports[1]);
         plan.api.port = ports[2];
         plan.sniffing = false;
         let actions = [RuleAction::Proxy, RuleAction::Block, RuleAction::Direct];
-        plan.rules = actions.into_iter().map(|action| CustomRule {
-            kind: RuleKind::Domain, value: "localhost".into(), action,
-        }).collect();
+        plan.rules = actions
+            .into_iter()
+            .map(|action| CustomRule {
+                kind: RuleKind::Domain,
+                value: "localhost".into(),
+                action,
+            })
+            .collect();
         let identity = |path: &str| RuleApplication {
-            path: path.into(), sha256: "a".repeat(64),
+            path: path.into(),
+            sha256: "a".repeat(64),
         };
-        let scopes = vec![vec![identity("/one/Client")], vec![identity("/two/Client")], vec![]];
+        let scopes = vec![
+            vec![identity("/one/Client")],
+            vec![identity("/two/Client")],
+            vec![],
+        ];
         let secret = "local-probe-only".repeat(2);
-        let (config, provider) = application_ingress::emit(
-            &plan, &scopes, ports[3], secret, "/usr/bin/sing-box".into(),
-        ).unwrap();
+        let (config, provider) =
+            application_ingress::emit(&plan, &scopes, ports[3], secret, "/usr/bin/sing-box".into())
+                .unwrap();
         let json: Value = serde_json::from_str(&config.body).unwrap();
         assert!(json["inbounds"][0]["users"].is_null());
         assert_eq!(json["inbounds"][1]["users"].as_array().unwrap().len(), 3);
@@ -656,15 +677,26 @@ mod tests {
         assert_eq!(rules[3]["outbound"], "direct");
         assert!(rules[3]["auth_user"].is_null());
         plan.policy = RoutingMode::Global;
-        assert!(application_ingress::emit(
-            &plan, &scopes, ports[3], "x".repeat(32), "/usr/bin/sing-box".into(),
-        ).is_err());
+        assert!(
+            application_ingress::emit(
+                &plan,
+                &scopes,
+                ports[3],
+                "x".repeat(32),
+                "/usr/bin/sing-box".into(),
+            )
+            .is_err()
+        );
 
         // The native probe supplies a private temp directory and unused ports.
         if let Some(path) = std::env::var_os("V2RAYR_APPLICATION_PROBE_DIR") {
             let path = std::path::Path::new(&path);
             std::fs::write(path.join("kernel.json"), config.body).unwrap();
-            std::fs::write(path.join("provider.json"), serde_json::to_vec(&provider).unwrap()).unwrap();
+            std::fs::write(
+                path.join("provider.json"),
+                serde_json::to_vec(&provider).unwrap(),
+            )
+            .unwrap();
         }
     }
 

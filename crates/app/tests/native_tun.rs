@@ -85,9 +85,12 @@ async fn app_tun_captures_traffic_and_releases_the_network() {
     let rules_mode = std::env::var("V2RAYR_TEST_TUN_RULES");
     let block_probe = rules_mode.as_deref() == Ok("block");
     let policy = if rules_mode.as_deref() == Ok("1") || block_probe {
-        assert!(tun::RULE_ROUTING_SUPPORTED);
-        let applications = v2rayr_app::inspect_rule_applications(&std::env::current_exe().unwrap())
-            .unwrap();
+        assert!(
+            std::hint::black_box(tun::RULE_ROUTING_SUPPORTED),
+            "the rule routing fixture requires macOS TUN"
+        );
+        let applications =
+            v2rayr_app::inspect_rule_applications(&std::env::current_exe().unwrap()).unwrap();
         let action = if block_probe { "block" } else { "proxy" };
         app.add_rule_for_applications("ip-cidr", "198.51.100.20/32", action, &applications)
             .unwrap();

@@ -138,7 +138,9 @@ impl Database {
             tx.execute_batch(MIGRATION_1)?;
         }
         if found < 2 {
-            tx.execute_batch("ALTER TABLE rules ADD COLUMN applications TEXT NOT NULL DEFAULT '[]';")?;
+            tx.execute_batch(
+                "ALTER TABLE rules ADD COLUMN applications TEXT NOT NULL DEFAULT '[]';",
+            )?;
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
@@ -237,9 +239,12 @@ mod tests {
         let path = dir.path().join("v1.sqlite");
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(MIGRATION_1).unwrap();
-        conn.execute_batch("PRAGMA user_version = 1;
+        conn.execute_batch(
+            "PRAGMA user_version = 1;
             INSERT INTO rules VALUES ('00000000-0000-0000-0000-000000000001',
-                'domain', 'example.com', 'direct', 1, 0, '2026-01-01T00:00:00Z');").unwrap();
+                'domain', 'example.com', 'direct', 1, 0, '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
         drop(conn);
 
         let db = Database::open(&path).unwrap();

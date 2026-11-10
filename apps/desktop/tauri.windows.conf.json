@@ -1,6 +1,15 @@
 {
   "bundle": {
     "targets": ["msi", "nsis"],
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "embedded-cores/windows-tun/": "windows-tun/"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "windows-tun-hooks.nsh"
+      }
+    }
   }
 }

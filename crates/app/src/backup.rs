@@ -11,7 +11,10 @@ use v2rayr_domain::RuleApplication;
 use v2rayr_ipc::{AppearanceSettings, ConnectionPhase, Problem, RoutingPolicy};
 use v2rayr_store::{RuleAction, RuleKind};
 
-use crate::{App, error, rules::{normalize_applications, normalize_rule_value}};
+use crate::{
+    App, error,
+    rules::{normalize_applications, normalize_rule_value},
+};
 
 const VERSION: u32 = 1;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -166,7 +169,9 @@ impl PortableBackup {
 }
 
 impl PortableRule {
-    fn validate(&self) -> Result<(RuleKind, String, RuleAction, bool, Vec<RuleApplication>), Problem> {
+    fn validate(
+        &self,
+    ) -> Result<(RuleKind, String, RuleAction, bool, Vec<RuleApplication>), Problem> {
         let kind =
             RuleKind::parse(&self.kind).ok_or_else(|| Problem::config("备份包含未知规则类型"))?;
         let action = RuleAction::parse(&self.action)
@@ -341,9 +346,14 @@ mod tests {
             path: "/Applications/Example.app/Contents/MacOS/Example".to_owned(),
             sha256: "a".repeat(64),
         };
-        source.add_rule_for_applications(
-            "domain", "example.com", "block", std::slice::from_ref(&application),
-        ).unwrap();
+        source
+            .add_rule_for_applications(
+                "domain",
+                "example.com",
+                "block",
+                std::slice::from_ref(&application),
+            )
+            .unwrap();
         target.add_rule("domain", "example.com", "block").unwrap();
         let backup = source.export_portable_backup().unwrap();
         let decoded = PortableBackup::decode(&backup.encode().unwrap()).unwrap();

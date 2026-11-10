@@ -73,12 +73,16 @@ pub fn bridge_config(request: &TunRequest) -> serde_json::Value {
         // Re-evaluate rules per UDP destination, even on a shared source socket.
         config["inbounds"][0]["udp_mapping"] = serde_json::json!("address_and_port_dependent");
         config["outbounds"][0]["bind_interface"] = serde_json::json!("lo0");
-        config["outbounds"].as_array_mut().expect("fixed outbounds")
+        config["outbounds"]
+            .as_array_mut()
+            .expect("fixed outbounds")
             .push(serde_json::json!({"type":"direct","tag":"direct"}));
         config["route"]["auto_detect_interface"] = serde_json::json!(true);
         config["route"]["default_domain_resolver"] = serde_json::json!("remote");
         config["route"]["final"] = serde_json::json!("direct");
-        let route = config["route"]["rules"].as_array_mut().expect("fixed route rules");
+        let route = config["route"]["rules"]
+            .as_array_mut()
+            .expect("fixed route rules");
         route.extend(rules.iter().map(|rule| {
             let mut value = match rule.action {
                 TunRuleAction::Proxy => serde_json::json!({"action":"route","outbound":"bridge"}),
@@ -91,7 +95,9 @@ pub fn bridge_config(request: &TunRequest) -> serde_json::Value {
             match &rule.target {
                 TunRuleTarget::Any => {}
                 TunRuleTarget::Domain(target) => value["domain"] = serde_json::json!([target]),
-                TunRuleTarget::DomainSuffix(target) => value["domain_suffix"] = serde_json::json!([target]),
+                TunRuleTarget::DomainSuffix(target) => {
+                    value["domain_suffix"] = serde_json::json!([target])
+                }
                 TunRuleTarget::IpCidr(target) => value["ip_cidr"] = serde_json::json!([target]),
             }
             value
@@ -100,28 +106,12 @@ pub fn bridge_config(request: &TunRequest) -> serde_json::Value {
     config
 }
 
-struct Bridge(
-    Child,
-    #[cfg(windows)]
-    #[allow(dead_code)]
-    v2rayr_platform::tun::windows::Job,
-);
+struct Bridge(Child);
 
 impl Bridge {
     fn spawn(mut command: Command) -> anyhow::Result<Self> {
         #[cfg(windows)]
-        {
-            let job = v2rayr_platform::tun::windows::Job::new()?;
-            v2rayr_platform::tun::windows::prepare_core(&mut command)?;
-            let mut child = command.spawn()?;
-            if let Err(error) = job.assign(&child) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.into());
-            }
-            Ok(Self(child, job))
-        }
-        #[cfg(unix)]
+        v2rayr_platform::tun::windows::prepare_core(&mut command)?;
         Ok(Self(command.spawn()?))
     }
 }
@@ -166,68 +156,79 @@ pub fn serve() -> anyhow::Result<()> {
     serve_io(std::io::stdin(), &mut std::io::stdout())
 }
 
-/// Handles `tun-install` and `tun-pipe` before a GUI or CLI parser starts.
-///
-/// The desktop executable is copied into the protected TUN directory and then
-/// elevated, so this process image has to recognize those two commands.
-pub fn handle_process_entry() -> bool {
-    #[cfg(not(windows))]
-    {
-        false
-    }
-    #[cfg(windows)]
-    {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        match (args.first().map(String::as_str), args.len()) {
-            (Some("tun-install"), 1) => {
-                if let Err(error) = v2rayr_platform::tun::windows::install_protected_bundle() {
-                    write_install_error(&error);
-                    std::process::exit(1);
-                }
-                true
-            }
-            (Some("tun-pipe"), 3) => {
-                let caller = args[2].parse().unwrap_or(0);
-                if let Err(error) = serve_windows(&args[1], caller) {
-                    eprintln!("{error:#}");
-                    std::process::exit(1);
-                }
-                true
-            }
-            _ => false,
-        }
+#[cfg(windows)]
+struct BlockingPipe<T>(tokio::runtime::Handle, T);
+
+#[cfg(windows)]
+impl<T: tokio::io::AsyncRead + Unpin> Read for BlockingPipe<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        use tokio::io::AsyncReadExt;
+        self.0.block_on(self.1.read(bytes))
     }
 }
 
 #[cfg(windows)]
-fn write_install_error(error: &std::io::Error) {
-    let Some(path) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("install-error.txt")))
-    else {
-        return;
-    };
-    let _ = std::fs::write(path, error.to_string());
+impl<T: tokio::io::AsyncWrite + Unpin> Write for BlockingPipe<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use tokio::io::AsyncWriteExt;
+        self.0.block_on(self.1.write(bytes))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        self.0.block_on(self.1.flush())
+    }
 }
 
 #[cfg(windows)]
 pub fn serve_windows(nonce: &str, caller: u32) -> anyhow::Result<()> {
-    let pipe = v2rayr_platform::tun::windows::open_for_helper(nonce, caller)?;
-    let mut writer = pipe.try_clone()?;
-    let result = serve_io(pipe, &mut writer);
+    use v2rayr_platform::tun::windows;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_io()
+        .build()?;
+    let pipe = {
+        let _entered = runtime.enter();
+        windows::open_for_helper(nonce, caller)?
+    };
+    let (reader, writer) = tokio::io::split(pipe);
+    let reader = BlockingPipe(runtime.handle().clone(), reader);
+    let mut writer = BlockingPipe(runtime.handle().clone(), writer);
+    let result = (|| {
+        let _lock = windows::lock_runtime()?;
+        windows::restore_network()?;
+        windows::guard_core_lifetime()?;
+        let bridge = serve_io(reader, &mut writer);
+        // serve_io drops the core before returning, including startup errors.
+        let recovery = windows::restore_network();
+        if let Err(error) = recovery {
+            bail!("Windows TUN network recovery failed: {error}; bridge result: {bridge:?}");
+        }
+        bridge
+    })();
     if let Err(error) = &result {
-        let _ = writer.write_all(format!("error: {error:#}\n").as_bytes());
+        let detail: String = format!("error: {error:#}")
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(480)
+            .collect();
+        let _ = writeln!(writer, "{detail}");
         let _ = writer.flush();
     }
     result
 }
 
+#[cfg(windows)]
+pub fn recover_windows() -> anyhow::Result<()> {
+    use v2rayr_platform::tun::windows;
+    let _lock = windows::lock_runtime()?;
+    windows::restore_network()?;
+    Ok(())
+}
+
 fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyhow::Result<()> {
     #[cfg(unix)]
     trusted_executable(BRIDGE_CORE.as_ref())
-        .context("validating administrator-installed TUN core")?;
-    #[cfg(windows)]
-    v2rayr_platform::tun::windows::validate_install()
         .context("validating administrator-installed TUN core")?;
     #[cfg(windows)]
     use v2rayr_platform::tun::windows::network_cleared;
@@ -237,9 +238,11 @@ fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyho
     let runtime = "/private/var/run";
     #[cfg(windows)]
     let runtime = v2rayr_platform::tun::windows::RUNTIME;
+    #[cfg(unix)]
     let lock = v2rayr_platform::acquire_single_instance(
         &std::path::Path::new(runtime).join("v2rayr-tun-bridge.lock"),
     )?;
+    #[cfg(unix)]
     let v2rayr_platform::InstanceOutcome::Primary(_lock) = lock else {
         bail!("TUN bridge already in use")
     };
@@ -255,7 +258,9 @@ fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyho
     std::thread::spawn(move || {
         let mut input = BufReader::new(reader);
         let mut frame = Vec::new();
-        let read = (&mut input).take(v2rayr_platform::tun::MAX_REQUEST_BYTES).read_until(b'\n', &mut frame);
+        let read = (&mut input)
+            .take(v2rayr_platform::tun::MAX_REQUEST_BYTES)
+            .read_until(b'\n', &mut frame);
         if read.is_err() || frame.last() != Some(&b'\n') {
             return;
         }
@@ -296,7 +301,11 @@ fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyho
                 .env("SystemRoot", r"C:\Windows")
                 .env("WINDIR", r"C:\Windows")
                 .env("PATH", r"C:\Windows\System32")
-                .current_dir(r"C:\Program Files\v2rayR-TUN");
+                .current_dir(
+                    std::path::Path::new(BRIDGE_CORE)
+                        .parent()
+                        .expect("core directory"),
+                );
         }
         #[cfg(not(windows))]
         command.current_dir(directory.path());
@@ -340,6 +349,9 @@ fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyho
         }
         std::thread::sleep(Duration::from_millis(30));
     }
+    #[cfg(windows)]
+    v2rayr_platform::tun::windows::capture_network()
+        .context("saving Windows interface state before TUN takeover")?;
     let mut bridge = Bridge::spawn(build("run"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let owned_interface = loop {
@@ -512,14 +524,20 @@ mod tests {
         let config = bridge_config(&request);
         let route = &config["route"];
         assert_eq!(route["final"], "direct");
-        assert_eq!(config["inbounds"][0]["udp_mapping"], "address_and_port_dependent");
+        assert_eq!(
+            config["inbounds"][0]["udp_mapping"],
+            "address_and_port_dependent"
+        );
         assert_eq!(route["auto_detect_interface"], true);
         assert_eq!(config["outbounds"][0]["bind_interface"], "lo0");
         assert_eq!(config["dns"]["servers"][0]["detour"], "bridge");
         let rules = route["rules"].as_array().unwrap();
         assert_eq!(rules[0]["action"], "hijack-dns");
         assert_eq!(rules[4]["domain"][0], "example.com");
-        assert_eq!(rules[4]["process_path"][0], "/Applications/Client.app/Contents/MacOS/Client");
+        assert_eq!(
+            rules[4]["process_path"][0],
+            "/Applications/Client.app/Contents/MacOS/Client"
+        );
         assert_eq!(rules[4]["outbound"], "bridge");
         assert_eq!(rules[5]["action"], "reject");
         assert_ne!(rules[4]["process_path"], rules[5]["process_path"]);
@@ -546,9 +564,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
         for request in requests {
-            std::fs::write(&config, serde_json::to_vec(&bridge_config(&request)).unwrap()).unwrap();
-            let output = Command::new(&core).args(["check", "-c"]).arg(&config).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            std::fs::write(
+                &config,
+                serde_json::to_vec(&bridge_config(&request)).unwrap(),
+            )
+            .unwrap();
+            let output = Command::new(&core)
+                .args(["check", "-c"])
+                .arg(&config)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }

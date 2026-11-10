@@ -67,7 +67,13 @@ enum Command {
     TunCapabilities,
     /// Private Windows UAC entry point; only accepts a local lease identifier.
     #[cfg(windows)]
-    TunPipe { nonce: String, caller: u32 },
+    TunPipeV2 { nonce: String, caller: u32 },
+    #[cfg(windows)]
+    #[command(hide = true)]
+    TunRecoverV2,
+    #[cfg(windows)]
+    #[command(hide = true)]
+    TunVerifyInstallV2,
 }
 
 #[derive(Subcommand, Debug)]
@@ -80,9 +86,6 @@ enum AutostartAction {
 }
 
 fn main() -> anyhow::Result<()> {
-    if v2rayr_helper::tun::handle_process_entry() {
-        return Ok(());
-    }
     let cli = Cli::parse();
     if matches!(cli.command, Command::TunStdio) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -91,12 +94,19 @@ fn main() -> anyhow::Result<()> {
         bail!("TUN helper is not available on this platform");
     }
     #[cfg(windows)]
-    if let Command::TunPipe { ref nonce, caller } = cli.command {
-        return v2rayr_helper::tun::serve_windows(nonce, caller);
+    match &cli.command {
+        Command::TunPipeV2 { nonce, caller } => {
+            return v2rayr_helper::tun::serve_windows(nonce, *caller);
+        }
+        Command::TunRecoverV2 => return v2rayr_helper::tun::recover_windows(),
+        Command::TunVerifyInstallV2 => {
+            return Ok(v2rayr_platform::tun::windows::validate_install()?);
+        }
+        _ => {}
     }
     #[cfg(windows)]
     if v2rayr_platform::tun::windows::is_admin() {
-        bail!("only tun-pipe may run with elevated privileges");
+        bail!("only Windows TUN lease or recovery may run elevated");
     }
     // Legacy commands accept caller paths and are never privileged.
     #[cfg(unix)]
@@ -172,9 +182,13 @@ fn into_request(command: Command) -> anyhow::Result<HelperRequest> {
             AutostartAction::Disable => HelperRequest::AutostartDisable,
         },
         Command::Status => HelperRequest::Status,
-        Command::Serve | Command::TunStdio | Command::TunCapabilities => bail!("serve is handled separately"),
+        Command::Serve | Command::TunStdio | Command::TunCapabilities => {
+            bail!("serve is handled separately")
+        }
         #[cfg(windows)]
-        Command::TunPipe { .. } => bail!("serve is handled separately"),
+        Command::TunPipeV2 { .. } | Command::TunRecoverV2 | Command::TunVerifyInstallV2 => {
+            bail!("serve is handled separately")
+        }
     })
 }
 

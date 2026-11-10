@@ -1,22 +1,29 @@
 //! One elevated Windows bridge per session. The GUI retains a private pipe and
 //! checks the PID returned by UAC; the helper checks the pipe server PID.
 use std::ffi::c_void;
-use std::fs::{File, OpenOptions};
 use std::io;
+
+mod recovery;
+pub use recovery::{capture_network, recovery_pending, restore_network};
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use windows_sys::Win32::{
-    Foundation::{LocalFree, WAIT_TIMEOUT},
+    Foundation::{LocalFree, WAIT_OBJECT_0},
     Security::{
-        Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, SECURITY_ATTRIBUTES,
+        Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, CreateWellKnownSid,
+        SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
+        TOKEN_OWNER, TokenOwner, WinBuiltinAdministratorsSid,
     },
+    Storage::FileSystem::SECURITY_IDENTIFICATION,
     System::{
         Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
         Console::{AllocConsole, CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent, GetConsoleCP},
@@ -27,8 +34,8 @@ use windows_sys::Win32::{
         },
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
         Threading::{
-            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, GetExitCodeProcess, GetProcessId,
-            WaitForSingleObject,
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, GetCurrentProcess, GetExitCodeProcess,
+            GetProcessId, OpenProcessToken, WaitForSingleObject,
         },
     },
     UI::{
@@ -43,9 +50,10 @@ use windows_sys::Win32::{
 use super::{BRIDGE_CORE, HELPER, TunRequest};
 use crate::PlatformError;
 
-const ROOT: &str = r"C:\Program Files\v2rayR-TUN";
-pub const RUNTIME: &str = r"C:\Program Files\v2rayR-TUN\run";
-const DLL: &str = r"C:\Program Files\v2rayR-TUN\wintun.dll";
+const ROOT: &str = r"C:\Program Files\v2rayR\windows-tun";
+pub const RUNTIME: &str = r"C:\Program Files\v2rayR\windows-tun\run";
+const MANIFEST: &str = r"C:\Program Files\v2rayR\windows-tun\bundle-v2.sha256";
+const DLL: &str = r"C:\Program Files\v2rayR\windows-tun\wintun.dll";
 const POWERSHELL: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
 
 fn wide(s: &str) -> Vec<u16> {
@@ -58,24 +66,28 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
+fn regular(path: &str, directory: bool) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.file_attributes() & 0x400 == 0
+            && if directory {
+                metadata.is_dir()
+            } else {
+                metadata.is_file()
+            }
+    })
+}
+
 pub fn provisioned() -> bool {
-    [r"C:\Program Files", ROOT, RUNTIME, HELPER, BRIDGE_CORE, DLL]
+    [r"C:\Program Files", r"C:\Program Files\v2rayR", ROOT]
         .iter()
-        .enumerate()
-        .all(|(index, path)| {
-            std::fs::symlink_metadata(path).is_ok_and(|metadata| {
-                metadata.file_attributes() & 0x400 == 0
-                    && if index < 3 {
-                        metadata.is_dir()
-                    } else {
-                        metadata.is_file()
-                    }
-            })
-        })
+        .all(|path| regular(path, true))
+        && [HELPER, BRIDGE_CORE, DLL, MANIFEST]
+            .iter()
+            .all(|path| regular(path, false))
 }
 
 fn ps(script: &str) -> bool {
-    Command::new(POWERSHELL)
+    let child = Command::new(POWERSHELL)
         .env_clear()
         .env("SystemRoot", r"C:\Windows")
         .env("WINDIR", r"C:\Windows")
@@ -93,36 +105,131 @@ fn ps(script: &str) -> bool {
             script,
         ])
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .is_ok_and(|output| output.status.success())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return false };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 pub fn validate_install() -> io::Result<()> {
     if !provisioned() {
         return Err(invalid(
-            "TUN installation missing or contains reparse points",
+            "请在默认 Program Files 目录安装或修复 Windows TUN 组件",
         ));
     }
-    // Known-folder default ACL is an OS prerequisite. For the installed
-    // subtree require an administrator-owned DACL with no unprivileged writes.
     if !ps(r#"
 $ErrorActionPreference = 'Stop'
-$root = 'C:\Program Files\v2rayR-TUN'
-$admins = @('S-1-5-32-544','S-1-5-18')
+$app = 'C:\Program Files\v2rayR'
+$root = "$app\windows-tun"
+$trusted = @('S-1-5-32-544','S-1-5-18','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 $read = [long]([System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [System.Security.AccessControl.FileSystemRights]::Synchronize)
-foreach ($p in @($root, "$root\run", "$root\v2rayr-helper.exe", "$root\sing-box.exe", "$root\wintun.dll")) {
+$paths = @('C:\Program Files', $app, $root, "$root\v2rayr-helper.exe", "$root\sing-box.exe", "$root\wintun.dll", "$root\bundle-v2.sha256")
+if (Test-Path -LiteralPath "$root\run") { $paths += "$root\run" }
+foreach ($p in $paths) {
+  if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 1 }
   $a = Get-Acl -LiteralPath $p
-  if ($admins -notcontains $a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) { exit 1 }
+  $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($a.GetSecurityDescriptorBinaryForm(), 0)
+  if ($null -eq $raw.DiscretionaryAcl -or $trusted -notcontains $raw.Owner.Value) { exit 1 }
   foreach ($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {
-    if ($r.AccessControlType -eq 'Allow' -and $admins -notcontains $r.IdentityReference.Value -and (([long]$r.FileSystemRights -band (-bnot $read)) -ne 0)) { exit 1 }
+    if (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+    if ($r.AccessControlType -eq 'Allow' -and $trusted -notcontains $r.IdentityReference.Value -and (([long]$r.FileSystemRights -band (-bnot $read)) -ne 0)) { exit 1 }
   }
+}
+# The dedicated executable directory also controls the DLL search path.
+$allowed = @('v2rayr-helper.exe','sing-box.exe','wintun.dll','Wintun-LICENSE.txt','bundle-v2.sha256','run')
+if (Get-ChildItem -LiteralPath $root -Force | Where-Object { $_.Name -notin $allowed }) { exit 1 }
+$files = @('v2rayr-helper.exe','sing-box.exe','wintun.dll')
+$hashes = @(Get-Content -LiteralPath "$root\bundle-v2.sha256")
+if ($hashes.Count -ne ($files.Count + 1)) { exit 1 }
+for ($i = 0; $i -lt $files.Count; $i++) {
+  $file = $files[$i]
+  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "$root\$file").Hash
+  if ($hashes[$i + 1] -ine "$hash  $file") { exit 1 }
 }
 exit 0
 "#)
     {
         return Err(invalid(
-            "TUN installation ACL is not administrator-controlled",
+            "Windows TUN 组件的权限或完整性检查失败，请使用受信任的安装包修复",
         ));
+    }
+    use std::io::BufRead;
+    let manifest = std::fs::File::open(MANIFEST)?;
+    let mut version = String::new();
+    io::BufReader::new(io::Read::take(manifest, 256)).read_line(&mut version)?;
+    if version.trim_end() != concat!("v2rayr-helper ", env!("CARGO_PKG_VERSION")) {
+        return Err(invalid("Windows TUN 组件版本不匹配，请升级或修复安装"));
+    }
+    Ok(())
+}
+
+pub fn lock_runtime() -> io::Result<crate::InstanceGuard> {
+    if !is_admin()
+        || std::fs::canonicalize(std::env::current_exe()?)? != std::fs::canonicalize(HELPER)?
+    {
+        return Err(invalid(
+            "Windows TUN requires the installed elevated helper",
+        ));
+    }
+    validate_install()?;
+    set_runtime_owner()?;
+    let lock = std::path::Path::new(RUNTIME).join("v2rayr-tun-bridge.lock");
+    match std::fs::symlink_metadata(&lock) {
+        Ok(metadata) if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 => {
+            return Err(invalid("Windows TUN lock is not a regular file"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match crate::acquire_single_instance(&lock).map_err(io::Error::other)? {
+        crate::InstanceOutcome::Primary(guard) => Ok(guard),
+        crate::InstanceOutcome::AlreadyRunning(_) => {
+            Err(invalid("Windows TUN bridge already in use"))
+        }
+    }
+}
+
+fn set_runtime_owner() -> io::Result<()> {
+    // The medium-integrity user also has the user's SID. If that SID owns the
+    // files created by the helper, it can change their DACL despite inheritance.
+    let mut sid = [0u32; SECURITY_MAX_SID_SIZE as usize / size_of::<u32>()];
+    let mut size = SECURITY_MAX_SID_SIZE;
+    let sid = sid.as_mut_ptr().cast();
+    let mut token = null_mut();
+    // SAFETY: aligned storage holds the full well-known SID and token out handle.
+    if unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, null_mut(), sid, &mut size) } == 0
+        || unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &mut token) } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let owner = TOKEN_OWNER { Owner: sid };
+    if unsafe {
+        SetTokenInformation(
+            token.as_raw_handle(),
+            TokenOwner,
+            (&owner as *const TOKEN_OWNER).cast(),
+            size_of::<TOKEN_OWNER>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -153,26 +260,51 @@ exit 0
 "#)
 }
 
+fn clear_owned_adapter() -> bool {
+    // sing-tun derives the adapter GUID from MD5("wintun" + interface name).
+    // An unrelated device reusing the alias must never be modified.
+    ps(r#"
+$ErrorActionPreference = 'Stop'
+$a = @(Get-NetAdapter -IncludeHidden | Where-Object {
+  $_.Name -eq 'v2rayr-tun0' -and [guid]$_.InterfaceGuid -eq [guid]'86384023-0cb4-0b76-aec1-6829986218d7'
+})
+if ($a.Count -ne 1) { exit 1 }
+$idx = $a[0].ifIndex
+Get-NetRoute -PolicyStore ActiveStore | Where-Object { $_.InterfaceIndex -eq $idx } |
+  Remove-NetRoute -Confirm:$false
+Get-NetIPAddress -PolicyStore ActiveStore | Where-Object {
+  $_.InterfaceIndex -eq $idx -and $_.IPAddress -in @('172.30.254.1','fd5b:67f3:2a9c::1')
+} | Remove-NetIPAddress -Confirm:$false
+Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses
+exit 0
+"#) && network_cleared()
+}
+
 pub fn is_admin() -> bool {
     // SAFETY: queries the current process token.
     unsafe { IsUserAnAdmin() != 0 }
 }
 
-pub fn open_for_helper(nonce: &str, caller: u32) -> io::Result<File> {
+pub fn open_for_helper(nonce: &str, caller: u32) -> io::Result<NamedPipeClient> {
     if !is_admin() || nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("invalid elevated pipe invocation"));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(pipe_name(nonce))?;
+    let pipe = open_client(nonce)?;
     let mut pid = 0;
-    // SAFETY: file owns the connected pipe and pid points to writable storage.
-    if unsafe { GetNamedPipeServerProcessId(file.as_raw_handle(), &mut pid) } == 0 || pid != caller
+    // SAFETY: pipe owns the connected handle and pid points to writable storage.
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 || pid != caller
     {
         return Err(invalid("pipe server is not the requesting app process"));
     }
-    Ok(file)
+    Ok(pipe)
+}
+
+fn open_client(nonce: &str) -> io::Result<NamedPipeClient> {
+    // Tokio opens an overlapped handle. Limit the unelevated server to token
+    // identification even though the client is elevated.
+    ClientOptions::new()
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(pipe_name(nonce))
 }
 
 fn server(nonce: &str) -> io::Result<NamedPipeServer> {
@@ -216,153 +348,37 @@ fn elevate(nonce: &str) -> io::Result<OwnedHandle> {
     validate_install()?;
     shell_execute(
         std::path::Path::new(HELPER),
-        &format!("tun-pipe {nonce} {}", std::process::id()),
+        &format!("tun-pipe-v2 {nonce} {}", std::process::id()),
         std::path::Path::new(ROOT),
     )
 }
 
-/// Installs the protected TUN directory by elevating a staged helper.
-///
-/// `helper` must be a regular `v2rayr-helper.exe` sitting beside `sing-box.exe`
-/// and `wintun.dll`. The elevated process copies that trio into Program Files.
-pub async fn elevate_install(helper: &std::path::Path) -> Result<(), PlatformError> {
-    let helper = helper.to_path_buf();
-    let report = helper.with_file_name("install-error.txt");
-    let _ = std::fs::remove_file(&report);
-    let helper_for_wait = helper.clone();
-    let started = tokio::task::spawn_blocking(move || {
-        let directory = helper_for_wait
-            .parent()
-            .ok_or_else(|| io::Error::other("无法定位 Windows TUN 安装目录"))?;
-        shell_execute(&helper_for_wait, "tun-install", directory)
-    })
-    .await
-    .map_err(io::Error::other)?;
-    let process = match started {
-        Ok(process) => process,
-        Err(error) if error.raw_os_error() == Some(1223) => {
-            return Err(PlatformError::PermissionDenied(
-                "已取消 Windows TUN 管理员授权".into(),
-            ));
-        }
-        Err(error) => {
-            return Err(PlatformError::PermissionDenied(format!(
-                "无法启动 Windows TUN 安装：{error}"
-            )));
-        }
-    };
-    let exit = tokio::task::spawn_blocking(move || wait_exit(&process))
-        .await
-        .map_err(io::Error::other)?
-        .map_err(PlatformError::Io)?;
-    if exit == 0 && provisioned() && validate_install().is_ok() {
+pub async fn recover_pending() -> Result<(), PlatformError> {
+    if !recovery_pending()? {
         return Ok(());
     }
-    let detail = std::fs::read_to_string(&report)
-        .unwrap_or_else(|_| format!("安装程序退出码 {exit}，没有留下原因"));
-    Err(PlatformError::PermissionDenied(format!(
-        "安装 Windows TUN 组件失败：{}",
-        detail.trim()
-    )))
-}
-
-fn wait_exit(process: &OwnedHandle) -> io::Result<u32> {
-    // SAFETY: the handle is owned and the exit code points at writable storage.
-    let waited = unsafe { WaitForSingleObject(process.as_raw_handle(), 120_000) };
-    if waited != 0 {
-        return Err(io::Error::other("Windows TUN 安装未在两分钟内结束"));
-    }
-    let mut code = 1;
-    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(code)
-}
-
-pub fn bundle_files(
-    dir: &std::path::Path,
-) -> io::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
-    let helper = dir.join("v2rayr-helper.exe");
-    let core = dir.join("sing-box.exe");
-    let dll = dir.join("wintun.dll");
-    for path in [&helper, &core, &dll] {
-        let metadata = std::fs::symlink_metadata(path).map_err(|_| {
-            invalid("Windows TUN 安装目录缺少 v2rayr-helper.exe、sing-box.exe 或 wintun.dll")
-        })?;
-        if metadata.file_attributes() & 0x400 != 0 || !metadata.is_file() {
-            return Err(invalid("Windows TUN 安装文件不能是符号链接或目录联接"));
+    tokio::task::spawn_blocking(|| {
+        validate_install()?;
+        let process = shell_execute(
+            std::path::Path::new(HELPER),
+            "tun-recover-v2",
+            std::path::Path::new(ROOT),
+        )?;
+        if unsafe { WaitForSingleObject(process.as_raw_handle(), 15_000) } != WAIT_OBJECT_0 {
+            return Err(io::Error::other("Windows TUN 恢复尚未完成"));
         }
-    }
-    Ok((helper, core, dll))
-}
-
-/// Copies the staged helper, sing-box and Wintun into the administrator directory.
-///
-/// Must run elevated. The source is the directory of this process, never a path
-/// supplied by the unelevated caller.
-pub fn install_protected_bundle() -> io::Result<()> {
-    if !is_admin() {
-        return Err(invalid("安装 Windows TUN 需要管理员权限"));
-    }
-    let exe = std::env::current_exe()?;
-    let Some(source) = exe.parent() else {
-        return Err(invalid("无法定位 Windows TUN 安装源"));
-    };
-    if source == std::path::Path::new(ROOT) {
-        return validate_install();
-    }
-    let (helper, core, dll) = bundle_files(source)?;
-    if std::path::Path::new(ROOT).exists() {
-        return Err(invalid(
-            "C:\\Program Files\\v2rayR-TUN 已存在但未通过校验，请由管理员检查后删除再重试",
-        ));
-    }
-    let result = (|| {
-        std::fs::create_dir(ROOT)?;
-        icacls(&[
-            ROOT,
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-            "*S-1-5-32-545:(OI)(CI)RX",
-        ])?;
-        std::fs::create_dir(RUNTIME)?;
-        std::fs::copy(&helper, HELPER)?;
-        std::fs::copy(&core, BRIDGE_CORE)?;
-        std::fs::copy(&dll, DLL)?;
-        icacls(&[ROOT, "/setowner", "*S-1-5-32-544", "/T"])?;
-        validate_install()
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(ROOT);
-    }
-    result
-}
-
-fn icacls(args: &[&str]) -> io::Result<()> {
-    let output = Command::new(r"C:\Windows\System32\icacls.exe")
-        .args(args)
-        .env_clear()
-        .env("SystemRoot", r"C:\Windows")
-        .env("WINDIR", r"C:\Windows")
-        .env("PATH", r"C:\Windows\System32")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    if output.status.success() {
+        let mut exit = 1;
+        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if exit != 0 || recovery_pending()? {
+            return Err(io::Error::other("Windows TUN 网络恢复失败，请重试恢复"));
+        }
         Ok(())
-    } else {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = if detail.trim().is_empty() {
-            String::from_utf8_lossy(&output.stdout)
-        } else {
-            detail
-        };
-        Err(io::Error::other(format!(
-            "设置 TUN 目录权限失败：{}",
-            detail.trim()
-        )))
-    }
+    })
+    .await
+    .map_err(io::Error::other)??;
+    Ok(())
 }
 
 fn shell_execute(
@@ -411,9 +427,9 @@ pub struct Lease {
 }
 
 impl Lease {
-    pub async fn start(request: &TunRequest) -> Result<Self, PlatformError> {
+    pub async fn launch() -> Result<Self, PlatformError> {
         let nonce = uuid::Uuid::new_v4().simple().to_string();
-        let mut pipe = server(&nonce)?;
+        let pipe = server(&nonce)?;
         let process = tokio::task::spawn_blocking(move || elevate(&nonce))
             .await
             .map_err(io::Error::other)?
@@ -424,6 +440,14 @@ impl Lease {
                     format!("无法启动 Windows TUN helper：{error}")
                 })
             })?;
+        Ok(Self {
+            pipe: Some(pipe),
+            process,
+        })
+    }
+
+    pub async fn wait_ready(&mut self, request: &TunRequest) -> Result<(), PlatformError> {
+        let pipe = self.pipe.as_mut().expect("lease has not been stopped");
         tokio::time::timeout(Duration::from_secs(10), pipe.connect())
             .await
             .map_err(|_| invalid("Windows TUN helper did not connect"))??;
@@ -431,13 +455,15 @@ impl Lease {
         // SAFETY: both handles remain owned for the duration of the checks.
         if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } == 0
             || pid == 0
-            || pid != unsafe { GetProcessId(process.as_raw_handle()) }
+            || pid != unsafe { GetProcessId(self.process.as_raw_handle()) }
         {
             return Err(invalid("pipe peer does not match the elevated TUN helper").into());
         }
         let mut frame = serde_json::to_vec(request).map_err(io::Error::other)?;
         frame.push(b'\n');
-        pipe.write_all(&frame).await?;
+        tokio::time::timeout(Duration::from_secs(5), pipe.write_all(&frame))
+            .await
+            .map_err(|_| invalid("Windows TUN request timed out"))??;
         let mut reader = BufReader::new(pipe);
         let mut ready = String::new();
         use tokio::io::AsyncReadExt;
@@ -456,15 +482,12 @@ impl Lease {
             };
             return Err(invalid(detail).into());
         }
-        Ok(Self {
-            pipe: Some(reader.into_inner()),
-            process,
-        })
+        Ok(())
     }
 
     pub fn exited(&self) -> bool {
         // SAFETY: this is a nonblocking query on an owned process handle.
-        unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) != WAIT_TIMEOUT }
+        unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) == WAIT_OBJECT_0 }
     }
 
     pub async fn stop(&mut self) -> Result<(), PlatformError> {
@@ -478,6 +501,7 @@ impl Lease {
             }
             tokio::time::sleep(Duration::from_millis(60)).await;
         }
+        recover_pending().await?;
         if !tokio::task::spawn_blocking(network_cleared)
             .await
             .map_err(io::Error::other)?
@@ -490,36 +514,33 @@ impl Lease {
     }
 }
 
-pub struct Job(OwnedHandle);
-impl Job {
-    pub fn new() -> io::Result<Self> {
-        let handle = unsafe { CreateJobObjectW(null(), null()) };
-        if handle.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: buffer matches the requested Windows info class.
-        if unsafe {
-            SetInformationJobObject(
-                handle.as_raw_handle(),
-                JobObjectExtendedLimitInformation,
-                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                std::mem::size_of_val(&info) as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self(handle))
+pub fn guard_core_lifetime() -> io::Result<()> {
+    // Join the job before spawning any core. Descendants inherit membership
+    // from the helper even if the helper is killed during process creation.
+    // The helper holds the only job handle for its entire process lifetime.
+    static JOB: std::sync::OnceLock<OwnedHandle> = std::sync::OnceLock::new();
+    let handle = unsafe { CreateJobObjectW(null(), null()) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
     }
-    pub fn assign(&self, child: &Child) -> io::Result<()> {
-        if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), child.as_raw_handle()) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: the information buffer matches the Windows job info class.
+    if unsafe {
+        SetInformationJobObject(
+            handle.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    } == 0
+        || unsafe { AssignProcessToJobObject(handle.as_raw_handle(), GetCurrentProcess()) } == 0
+    {
+        return Err(io::Error::last_os_error());
     }
+    JOB.set(handle)
+        .map_err(|_| io::Error::other("TUN helper job is already initialized"))
 }
 
 pub fn prepare_core(command: &mut Command) -> io::Result<()> {
@@ -539,18 +560,37 @@ pub fn request_core_stop(child: &Child) {
 
 #[cfg(test)]
 mod tests {
-    use super::bundle_files;
+    use super::*;
 
-    #[test]
-    fn bundle_requires_the_three_regular_files() {
-        let dir = tempfile::tempdir().expect("temp");
-        std::fs::write(dir.path().join("v2rayr-helper.exe"), b"helper").unwrap();
-        std::fs::write(dir.path().join("sing-box.exe"), b"core").unwrap();
-        assert!(bundle_files(dir.path()).is_err());
-        std::fs::write(dir.path().join("wintun.dll"), b"dll").unwrap();
-        let (helper, core, dll) = bundle_files(dir.path()).expect("bundle");
-        assert_eq!(helper.file_name().unwrap(), "v2rayr-helper.exe");
-        assert_eq!(core.file_name().unwrap(), "sing-box.exe");
-        assert_eq!(dll.file_name().unwrap(), "wintun.dll");
+    #[tokio::test]
+    async fn pipe_replies_while_lease_read_is_pending() {
+        use tokio::io::AsyncReadExt;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mut server = server(&nonce).unwrap();
+        let client = open_client(&nonce).unwrap();
+        server.connect().await.unwrap();
+        let (mut read, mut write) = tokio::io::split(client);
+        let mut buffer = [0];
+        let mut eof = std::pin::pin!(read.read(&mut buffer));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut eof)
+                .await
+                .is_err()
+        );
+        write.write_all(b"ready\n").await.unwrap();
+        let mut ready = [0; 6];
+        tokio::time::timeout(Duration::from_secs(2), server.read_exact(&mut ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&ready, b"ready\n");
+        drop(server);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), eof)
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
     }
 }

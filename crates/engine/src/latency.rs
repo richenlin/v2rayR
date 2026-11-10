@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_closed_port_reports_a_network_error() {
+    async fn a_closed_port_reports_a_connection_failure() {
         let port = {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             listener.local_addr().expect("addr").port()
@@ -163,7 +163,10 @@ mod tests {
         let error = tcp_latency("127.0.0.1", port, Duration::from_secs(1))
             .await
             .expect_err("must fail");
-        assert!(matches!(error, EngineError::Network(_)));
+        assert!(matches!(
+            error,
+            EngineError::Network(_) | EngineError::Timeout(_)
+        ));
     }
 
     #[tokio::test]

@@ -156,9 +156,6 @@ enum SubCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if v2rayr_helper::tun::handle_process_entry() {
-        return Ok(());
-    }
     let cli = Cli::parse();
     let paths = match &cli.home {
         Some(root) => AppPaths::new(root.clone()),
@@ -598,7 +595,11 @@ fn parse_mode(raw: &str) -> anyhow::Result<TakeoverMode> {
 }
 
 fn connection_policy(mode: TakeoverMode, policy: Option<&str>) -> anyhow::Result<RoutingPolicy> {
-    let default = if mode == TakeoverMode::Tun { "global" } else { "rule" };
+    let default = if mode == TakeoverMode::Tun {
+        "global"
+    } else {
+        "rule"
+    };
     parse_policy(policy.unwrap_or(default))
 }
 

@@ -29,6 +29,6 @@ cd apps/desktop && ../../ui/node_modules/.bin/tauri dev
 ## 已知缺口
 
 - 托盘菜单只暴露了配置项，图标与菜单项尚未接上。
-- 「一键安装特权 helper」的引导流程未实现，TUN 会直接返回 `permission_denied` 并给出替代方案。
+- Windows 的 MSI 和 NSIS 在默认 Program Files 目录部署 TUN 组件。其他平台的部署流程见 [TUN 助手](../../docs/tun-desktop.md)。
 - 合并到 `main` 后，CI 在 macOS、Windows、Linux 上分别打包，产物在该任务的 `dist/`，并作为构建产物上传。签名和公证仍由手动的 Signed release candidates 工作流完成。
 - 拉取请求只编译桌面壳，不产出安装包。

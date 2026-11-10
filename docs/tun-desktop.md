@@ -27,28 +27,17 @@ TUN 就绪后，helper 使用 macOS Dynamic Store 的临时解析器接管系统
 
 ## Windows x64
 
-当前实现要求标准 `C:\Program Files` 和 `C:\Windows`，并要求用户可在本账号完成 UAC 提权；使用另一账户输入管理员凭据的路径未支持。管理员验证 helper、sing-box 和对应架构的官方 Wintun DLL 来源，安装到固定目录：
+用可信的 MSI 或 NSIS 安装包按机器安装到默认的 `C:\Program Files\v2rayR`。安装包在 `windows-tun` 子目录内放置独立 helper、专用 sing-box、官方 Wintun 0.14.1 DLL、许可与版本及 SHA-256 清单。启动前校验路径、所有者、ACL、版本和文件摘要。旧版 `C:\Program Files\v2rayR-TUN` 目录可由管理员在确认旧会话已停止后清理。
 
-- `C:\Program Files\v2rayR-TUN\v2rayr-helper.exe`
-- `C:\Program Files\v2rayR-TUN\sing-box.exe`
-- `C:\Program Files\v2rayR-TUN\wintun.dll`
-- `C:\Program Files\v2rayR-TUN\run\`（目录）
+连接仍需要当前账号完成 UAC。只有安装目录里的 helper 会被提升。应用和 helper 检查对方的命名管道 PID，并使用异步管道同时处理回复与租约断开。Windows CLI 也复用安装目录中的组件。
 
-整个子树由 Administrators 或 SYSTEM 所有，只允许这两者写入；给普通 Users 读和执行，不使用符号链接或目录联接。新部署可在**管理员 PowerShell**中先设置目录 ACL，再从已验证的源复制文件。下面的命令仅适用于新安装；已有目录先由管理员审查。
+异常退出后，helper 使用受保护的恢复记录核对 TUN 路由与接管前已启用的 `WeakHostSend`。如果 helper 被强杀，客户端在断开、重试或再次连接时可请求管理员恢复。恢复记录按接口 GUID 和地址族存储，尚未通过读回的记录会保留。会话期间才出现且被上游 core 修改的接口可能缺少启动前记录，热插拔恢复须单独验收。
+
+升级前先断开 TUN。桌面内置更新会先等待网络恢复，再启动安装器。修复时可重新运行可信 NSIS 安装包，或以管理员身份运行 `msiexec /fa "路径\v2rayR.msi"`。也可运行以下命令确认安装目录的内容、版本和权限一致。
 
 ```powershell
-$root = 'C:\Program Files\v2rayR-TUN'
-if (Test-Path -LiteralPath $root) { throw '已有部署，请先审查 ACL 和二进制' }
-New-Item -ItemType Directory -Path $root | Out-Null
-icacls.exe $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX'
-if ($LASTEXITCODE) { throw '设置 TUN 目录 ACL 失败' }
-New-Item -ItemType Directory -Path "$root\run" | Out-Null
-Copy-Item -LiteralPath .\v2rayr-helper.exe,.\sing-box.exe,.\wintun.dll -Destination $root
-icacls.exe $root /setowner '*S-1-5-32-544' /T
-if ($LASTEXITCODE) { throw '设置管理员所有者失败' }
+& 'C:\Program Files\v2rayR\windows-tun\v2rayr-helper.exe' tun-verify-install-v2
 ```
-
-每次接入时只为固定 helper 请求 UAC。应用和 helper 双向检查本地命名管道的进程身份；管道拒绝远程访问。helper 用 Job Object 管理网关，优先请求正常退出，超时才终止，并验证地址和路由已经撤销。若存在同名适配器的残留路由，拒绝下一次接管，不对其他 Wintun 设备做批量删除。
 
 ## 实机验收
 
@@ -59,5 +48,7 @@ V2RAYR_TUN_ISOLATED_TEST=1 V2RAYR_TEST_TUN_ADDRESS=192.168.77.2 cargo test -p v2
 ```
 
 macOS 安装新版 helper 后，可在同一条命令前另加 `V2RAYR_TEST_TUN_RULES=1`，验证测试进程的精确应用规则能通过 TUN 到达该 SOCKS 服务。该用例仅覆盖匹配后的 TCP 代理及正常清理。
+
+Windows 实机应分别从 MSI 与 NSIS 安装，使用同账号的非提升桌面进程验证首次 UAC、拒绝后重试、TCP/UDP、IPv4/IPv6、DNS，以及正常断开和分别强杀 GUI、helper、core 后的恢复。用 `Get-NetIPInterface`、`Get-NetRoute` 和 `Get-DnsClientServerAddress` 比对接管前后的状态，包含 `WeakHostSend`、切换网卡、升级及损坏文件修复。
 
 Windows 在 PowerShell 中先设置对应的 `$env:V2RAYR_TUN_ISOLATED_TEST` 和 `$env:V2RAYR_TEST_TUN_ADDRESS`，再执行同一条 Cargo 命令。将示例 IP 换成隔离环境中本机实际绑定的私有 IPv4。不要在日常工作机用该用例切换系统网络。

@@ -229,7 +229,13 @@ impl Database {
     ) -> Result<bool, StoreError> {
         Ok(self.conn().execute(
             "UPDATE rules SET kind = ?2, value = ?3, action = ?4, applications = ?5 WHERE id = ?1",
-            params![id.to_string(), kind.as_str(), value, action.as_str(), serde_json::to_string(applications)?],
+            params![
+                id.to_string(),
+                kind.as_str(),
+                value,
+                action.as_str(),
+                serde_json::to_string(applications)?
+            ],
         )? > 0)
     }
 

@@ -133,6 +133,11 @@ jobs:
       - name: Build installers into dist/
         shell: bash
         run: bash scripts/package-desktop.sh
+      - name: Verify the installed Windows TUN bundle
+        timeout-minutes: 10
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-tun-package.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: v2rayR-${{ matrix.os }}

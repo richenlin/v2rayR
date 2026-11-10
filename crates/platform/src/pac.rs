@@ -110,9 +110,14 @@ pub fn render_pac_with_overrides(
         let action = if rule.direct { "DIRECT" } else { &destination };
         format!("  if ({condition}) return {action};\n")
     }).collect::<String>();
-    let ipv6 = if overrides.iter().any(|rule| matches!(rule.target, PacMatch::Ip(std::net::IpAddr::V6(_), _))) {
+    let ipv6 = if overrides
+        .iter()
+        .any(|rule| matches!(rule.target, PacMatch::Ip(std::net::IpAddr::V6(_), _)))
+    {
         IPV6_MATCHER
-    } else { "" };
+    } else {
+        ""
+    };
     let decision = match rules {
         Some(rules) => format!(
             "  var rules = {};\n\
@@ -286,15 +291,34 @@ mod tests {
 
     #[test]
     fn custom_decisions_precede_downloaded_rules() {
-        let downloaded = vec![vec![vec!["prefer.example".into()], vec!["block.example".into()]]];
+        let downloaded = vec![vec![
+            vec!["prefer.example".into()],
+            vec!["block.example".into()],
+        ]];
         let overrides = [
-            PacOverride { target: PacMatch::Domain("prefer.example".into()), direct: false },
-            PacOverride { target: PacMatch::DomainSuffix("block.example".into()), direct: true },
-            PacOverride { target: PacMatch::Domain("reject.example".into()), direct: false },
-            PacOverride { target: PacMatch::Ip("203.0.113.0".parse().unwrap(), 24), direct: false },
-            PacOverride { target: PacMatch::Ip("2001:db8::".parse().unwrap(), 32), direct: false },
+            PacOverride {
+                target: PacMatch::Domain("prefer.example".into()),
+                direct: false,
+            },
+            PacOverride {
+                target: PacMatch::DomainSuffix("block.example".into()),
+                direct: true,
+            },
+            PacOverride {
+                target: PacMatch::Domain("reject.example".into()),
+                direct: false,
+            },
+            PacOverride {
+                target: PacMatch::Ip("203.0.113.0".parse().unwrap(), 24),
+                direct: false,
+            },
+            PacOverride {
+                target: PacMatch::Ip("2001:db8::".parse().unwrap(), 32),
+                direct: false,
+            },
         ];
-        let script = render_pac_with_overrides("127.0.0.1", 10808, &[], Some(&downloaded), &overrides);
+        let script =
+            render_pac_with_overrides("127.0.0.1", 10808, &[], Some(&downloaded), &overrides);
         let pac_list = script.find("var rules").unwrap();
         for condition in [
             "if (host === \"prefer.example\") return \"PROXY 127.0.0.1:10808\";",

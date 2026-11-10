@@ -160,7 +160,11 @@ impl SessionRuntime {
     }
 
     fn policy_for(&self, mode: TakeoverMode) -> RoutingPolicy {
-        if mode == TakeoverMode::Tun { self.tun_policy } else { self.policy }
+        if mode == TakeoverMode::Tun {
+            self.tun_policy
+        } else {
+            self.policy
+        }
     }
 
     fn select_policy(&mut self, policy: RoutingPolicy) {
@@ -244,98 +248,6 @@ impl SessionRuntime {
 
 pub(crate) fn new_secret() -> String {
     uuid::Uuid::new_v4().simple().to_string()
-}
-
-#[cfg(windows)]
-async fn ensure_windows_tun(app: &App) -> Result<(), Problem> {
-    if v2rayr_platform::tun::provisioned() {
-        return Ok(());
-    }
-    let sing = app
-        .cores
-        .read()
-        .expect("cores")
-        .path(v2rayr_domain::CoreKind::SingBox)
-        .ok_or_else(|| Problem::config("Windows TUN 需要已安装的 sing-box"))?
-        .to_path_buf();
-    let dll = find_wintun(&sing).ok_or_else(|| {
-        Problem::config(
-            "Windows TUN 需要与 sing-box 放在一起的 wintun.dll。请重新安装 sing-box 内核",
-        )
-    })?;
-    let stage = app.paths().runtime_dir().join("tun-bundle");
-    let helper = tokio::task::spawn_blocking(move || stage_windows_tun(&stage, &sing, &dll))
-        .await
-        .map_err(|error| crate::error::internal(error.to_string()))?
-        .map_err(Problem::config)?;
-    v2rayr_platform::tun::windows::elevate_install(&helper)
-        .await
-        .map_err(crate::error::from_platform)
-}
-
-#[cfg(windows)]
-fn find_wintun(sing: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut candidates = vec![sing.with_file_name("wintun.dll")];
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join("wintun.dll"));
-        candidates.push(dir.join("resources").join("wintun.dll"));
-    }
-    candidates.into_iter().find(|path| is_regular_file(path))
-}
-
-#[cfg(windows)]
-fn stage_windows_tun(
-    stage: &std::path::Path,
-    sing: &std::path::Path,
-    dll: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
-    if let Ok(metadata) = std::fs::symlink_metadata(stage) {
-        if !is_real_directory(&metadata) {
-            return Err("TUN 安装暂存目录不是普通文件夹".to_owned());
-        }
-        std::fs::remove_dir_all(stage)
-            .map_err(|error| format!("无法清理 TUN 安装暂存目录：{error}"))?;
-    }
-    std::fs::create_dir_all(stage)
-        .map_err(|error| format!("无法创建 TUN 安装暂存目录：{error}"))?;
-    let exe = std::env::current_exe().map_err(|error| format!("无法定位当前程序：{error}"))?;
-    copy_regular_file(&exe, &stage.join("v2rayr-helper.exe"))?;
-    copy_regular_file(sing, &stage.join("sing-box.exe"))?;
-    copy_regular_file(dll, &stage.join("wintun.dll"))?;
-    Ok(stage.join("v2rayr-helper.exe"))
-}
-
-#[cfg(windows)]
-fn copy_regular_file(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
-    if !is_regular_file(source) {
-        return Err(format!("TUN 组件不是普通文件：{}", source.display()));
-    }
-    std::fs::copy(source, target).map_err(|error| {
-        format!(
-            "无法复制 {}：{error}",
-            source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("TUN 组件")
-        )
-    })?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn is_regular_file(path: &std::path::Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
-        use std::os::windows::fs::MetadataExt;
-        metadata.is_file() && metadata.file_attributes() & 0x400 == 0
-    })
-}
-
-#[cfg(windows)]
-fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.is_dir() && metadata.file_attributes() & 0x400 == 0
 }
 
 /// Whether an app-originated download can be sent through the running kernel.
@@ -474,17 +386,29 @@ impl App {
     }
 
     async fn start_session(&self, request: &ConnectionRequest) -> Result<(), Problem> {
+        #[cfg(windows)]
+        v2rayr_platform::tun::windows::recover_pending()
+            .await
+            .map_err(recovery_problem)?;
         let enabled_rules = self.db().enabled_rules().map_err(error::from_store)?;
         let policy = effective_policy(request.mode, request.policy);
-        if !matches!(request.mode, TakeoverMode::Tun | TakeoverMode::Pac) && policy == RoutingPolicy::Rule
-            && enabled_rules.iter().any(|rule| !rule.applications.is_empty())
+        if !matches!(request.mode, TakeoverMode::Tun | TakeoverMode::Pac)
+            && policy == RoutingPolicy::Rule
+            && enabled_rules
+                .iter()
+                .any(|rule| !rule.applications.is_empty())
         {
             return Err(Problem::config(
                 "应用身份接管尚未部署于当前接入方式。请使用 macOS TUN 规则分流，或停用指定应用规则。",
             ));
         }
         let tun_rules = if request.mode == TakeoverMode::Tun && policy == RoutingPolicy::Rule {
-            Some(enabled_rules.iter().map(crate::rules::tun_rule).collect::<Result<Vec<_>, _>>()?)
+            Some(
+                enabled_rules
+                    .iter()
+                    .map(crate::rules::tun_rule)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
         } else {
             None
         };
@@ -541,11 +465,13 @@ impl App {
                     "TUN 当前仅接受使用固定 IPv4 的节点，避免节点域名变更后形成路由回环",
                 )
             })?;
-            #[cfg(windows)]
-            ensure_windows_tun(self).await?;
             if !v2rayr_platform::tun::provisioned() {
                 return Err(Problem::new(ErrorCode::PermissionDenied.as_str(), false)
-                    .with_detail("当前平台尚未部署 TUN helper；请改用系统代理或本地端口"));
+                    .with_detail(if cfg!(windows) {
+                        "请使用受信任的 Windows 安装包在默认 Program Files 目录安装或修复 TUN 组件"
+                    } else {
+                        "当前平台尚未部署 TUN helper；请改用系统代理或本地端口"
+                    }));
             }
             Some(address)
         } else {
@@ -626,7 +552,11 @@ impl App {
                 .address
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback());
-        let kernel_policy = if tun_request.is_some() { RoutingPolicy::Global } else { policy };
+        let kernel_policy = if tun_request.is_some() {
+            RoutingPolicy::Global
+        } else {
+            policy
+        };
         let plan = SessionPlan {
             profile,
             core_override,
@@ -815,6 +745,21 @@ impl App {
             }
             TakeoverMode::Tun => {
                 let request = tun_request.expect("TUN validated above");
+                #[cfg(windows)]
+                let mut lease = v2rayr_platform::tun::TunLease::launch_windows(&request)
+                    .await
+                    .map_err(error::from_platform)?;
+                #[cfg(windows)]
+                if let Err(error) = lease.wait_windows_ready(&request).await {
+                    if let Err(cleanup_error) = lease.stop().await {
+                        let mut session = self.session.lock().expect("session");
+                        session.tun = Some(lease);
+                        session.process = Some(process);
+                        return Err(recovery_problem(cleanup_error));
+                    }
+                    return Err(error::from_platform(error));
+                }
+                #[cfg(not(windows))]
                 let mut lease = v2rayr_platform::tun::TunLease::start(&request)
                     .await
                     .map_err(error::from_platform)?;
@@ -940,6 +885,14 @@ impl App {
                 self.fail(problem.clone());
                 return Err(problem);
             }
+        }
+        #[cfg(windows)]
+        if tun.is_none()
+            && let Err(error) = v2rayr_platform::tun::windows::recover_pending().await
+        {
+            let problem = recovery_problem(error);
+            self.fail(problem.clone());
+            return Err(problem);
         }
         self.clear_takeover_journal();
         let (process, pac) = {
@@ -1216,13 +1169,17 @@ mod tests {
     #[tokio::test]
     async fn unavailable_app_capture_cannot_apply_a_scoped_rule_to_all_apps() {
         let app = crate::test_support::temp_app();
-        let rules = app.add_rule_for_applications(
-            "domain", "example.com", "block",
-            &[v2rayr_domain::RuleApplication {
-                path: "/Applications/Example.app/Contents/MacOS/Example".to_owned(),
-                sha256: "a".repeat(64),
-            }],
-        ).unwrap();
+        let rules = app
+            .add_rule_for_applications(
+                "domain",
+                "example.com",
+                "block",
+                &[v2rayr_domain::RuleApplication {
+                    path: "/Applications/Example.app/Contents/MacOS/Example".to_owned(),
+                    sha256: "a".repeat(64),
+                }],
+            )
+            .unwrap();
         let mut request = ConnectionRequest {
             profile_id: Uuid::new_v4(),
             mode: TakeoverMode::Manual,
@@ -1232,11 +1189,17 @@ mod tests {
         assert!(blocked.detail.unwrap().contains("应用身份接管尚未部署"));
         request.mode = TakeoverMode::Tun;
         request.policy = RoutingPolicy::Global;
-        assert_eq!(app.start_session(&request).await.unwrap_err().code, "not_found");
+        assert_eq!(
+            app.start_session(&request).await.unwrap_err().code,
+            "not_found"
+        );
         request.mode = TakeoverMode::Manual;
         request.policy = RoutingPolicy::Rule;
         app.set_rule_enabled(rules[0].id, false).unwrap();
-        assert_eq!(app.start_session(&request).await.unwrap_err().code, "not_found");
+        assert_eq!(
+            app.start_session(&request).await.unwrap_err().code,
+            "not_found"
+        );
     }
 
     #[test]

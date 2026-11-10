@@ -386,7 +386,7 @@ fn install_geodata(stage: &Path, binary: &Path, dir: &Path) {
     let Some(root) = binary.parent() else {
         return;
     };
-    for name in ["geoip.dat", "geosite.dat", "wintun.dll"] {
+    for name in ["geoip.dat", "geosite.dat"] {
         let source = [
             root.join(name),
             stage.join(name),

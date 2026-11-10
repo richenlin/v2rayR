@@ -163,8 +163,8 @@ pub fn set_login_start(enabled: bool, program: &Path) -> Result<(), PlatformErro
             .filter(|path| path.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
             .ok_or_else(|| PlatformError::InvalidState("未找到用户配置目录".into()))?;
-        return DesktopEntryAutostart::new(config.join("autostart/v2rayr.desktop"))
-            .set_enabled(enabled, program);
+        DesktopEntryAutostart::new(config.join("autostart/v2rayr.desktop"))
+            .set_enabled(enabled, program)
     }
     #[cfg(windows)]
     return windows::set_enabled(enabled, program);

@@ -43,7 +43,27 @@ for file in geoip.dat geosite.dat; do
   cp "$work/xray/data/cores/$file" "$stage/xray-assets/"
 done
 if [[ "$triple" == *-pc-windows-msvc ]]; then
-  cp "$work/sing-box/data/cores/wintun.dll" "$stage/wintun.dll"
+  case "$triple" in
+    x86_64-*) wintun_arch=amd64 ;;
+    aarch64-*) wintun_arch=arm64 ;;
+    i686-*) wintun_arch=x86 ;;
+    *) echo "Unsupported Wintun architecture: $triple" >&2; exit 1 ;;
+  esac
+  wintun_zip="$work/wintun.zip"
+  curl --fail --location --retry 3 --output "$wintun_zip" https://www.wintun.net/builds/wintun-0.14.1.zip
+  printf '%s  %s\n' 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51 "$wintun_zip" | sha256sum -c -
+  mkdir -p "$stage/windows-tun"
+  unzip -p "$wintun_zip" "wintun/bin/$wintun_arch/wintun.dll" > "$stage/windows-tun/wintun.dll"
+  unzip -p "$wintun_zip" wintun/LICENSE.txt > "$stage/windows-tun/Wintun-LICENSE.txt"
+  cargo build --locked --release -p v2rayr-helper
+  install -m 0755 target/release/v2rayr-helper.exe "$stage/windows-tun/v2rayr-helper.exe"
+  install -m 0755 "$work/sing-box/data/cores/sing-box.exe" "$stage/windows-tun/sing-box.exe"
+  helper_version=$(./target/release/v2rayr-helper.exe --version | tr -d '\r')
+  (
+    cd "$stage/windows-tun"
+    printf '%s\n' "$helper_version"
+    sha256sum v2rayr-helper.exe sing-box.exe wintun.dll
+  ) > "$stage/windows-tun/bundle-v2.sha256"
 fi
 rm -rf -- apps/desktop/embedded-cores
 mv "$stage" apps/desktop/embedded-cores
