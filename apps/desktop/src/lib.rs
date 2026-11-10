@@ -510,15 +510,18 @@ pub fn run() {
                 });
             }
 
-            if app.settings().startup.show_tray_icon {
+            let startup = app.settings().startup;
+            if startup.show_tray_icon {
                 install_tray(handle.handle())?;
             }
 
-            // "Start minimised" means: the tray is the UI until the user asks
-            // for the window, which is how the login item should behave.
-            if app.settings().startup.start_minimized {
-                if let Some(window) = handle.get_webview_window("main") {
-                    let _ = window.hide();
+            if startup.start_minimized
+                && let Some(window) = handle.get_webview_window("main")
+            {
+                if startup.show_tray_icon {
+                    hide_main(&window.as_ref().window());
+                } else {
+                    let _ = window.minimize();
                 }
             }
 
@@ -566,16 +569,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps the proxy running, like every other
-            // menu-bar proxy: the quit action is the tray menu.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let Some(shell) = window.app_handle().try_state::<Shell>() else {
-                    return;
-                };
-                if shell.app.settings().startup.close_to_tray && window.app_handle().tray_by_id("main").is_some() {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+            if window.label() == "main"
+                && let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && let Some(shell) = window.app_handle().try_state::<Shell>()
+                && shell.app.settings().startup.close_to_tray
+                && window.app_handle().tray_by_id("main").is_some()
+            {
+                api.prevent_close();
+                hide_main(window);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -762,8 +763,31 @@ fn install_tray(handle: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+fn hide_main(window: &tauri::Window) {
+    if let Err(error) = window.hide() {
+        tracing::warn!(%error, "could not hide the main window");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = window.app_handle().set_dock_visibility(false) {
+        tracing::warn!(%error, "could not hide the Dock icon");
+    }
+    #[cfg(windows)]
+    if let Err(error) = window.set_skip_taskbar(true) {
+        tracing::warn!(%error, "could not hide the taskbar button");
+    }
+}
+
 fn show_main(handle: &AppHandle) {
     if let Some(window) = handle.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = handle.set_dock_visibility(true) {
+            tracing::warn!(%error, "could not restore the Dock icon");
+        }
+        #[cfg(windows)]
+        if let Err(error) = window.set_skip_taskbar(false) {
+            tracing::warn!(%error, "could not restore the taskbar button");
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
