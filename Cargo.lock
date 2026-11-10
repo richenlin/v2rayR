@@ -1609,6 +1609,7 @@ dependencies = [
 name = "v2rayr-platform"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "libc",
  "serde",

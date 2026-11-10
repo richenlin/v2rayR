@@ -273,9 +273,39 @@ impl Drop for PacServer {
 }
 
 fn serve(mut stream: TcpStream, body: &str) {
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
-    let mut buffer = [0u8; 1024];
-    let _ = stream.read(&mut buffer);
+    use std::time::{Duration, Instant};
+
+    // Some platforms inherit nonblocking mode from the listener.
+    if stream.set_nonblocking(false).is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .is_err()
+    {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut buffer = [0u8; 8192];
+    let mut used = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero()
+            || used == buffer.len()
+            || stream.set_read_timeout(Some(remaining)).is_err()
+        {
+            return;
+        }
+        match stream.read(&mut buffer[used..]) {
+            Ok(0) => return,
+            Ok(count) => {
+                used += count;
+                if buffer[..used].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
         body.len(),
@@ -369,7 +399,11 @@ mod tests {
             .trim_start_matches("http://")
             .trim_end_matches("/proxy.pac");
         let mut stream = TcpStream::connect(address).expect("connect");
-        write!(stream, "GET /proxy.pac HTTP/1.1\r\nHost: x\r\n\r\n").expect("write");
+        // Let the server accept the connection before the rest of the header
+        // arrives, as happens when TCP splits a request into multiple reads.
+        stream.write_all(b"GET /proxy.pac HTTP/1.1\r\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        stream.write_all(b"Host: x\r\n\r\n").unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("read");
         assert!(response.starts_with("HTTP/1.1 200 OK"));

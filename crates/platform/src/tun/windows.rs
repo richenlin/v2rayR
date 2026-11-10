@@ -87,6 +87,16 @@ pub fn provisioned() -> bool {
 }
 
 fn ps(script: &str) -> bool {
+    powershell(script, Duration::from_secs(5), Stdio::null())
+}
+
+fn powershell(script: &str, timeout: Duration, stderr: Stdio) -> bool {
+    use base64::Engine;
+    let script = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(script);
     let child = Command::new(POWERSHELL)
         .env_clear()
         .env("SystemRoot", r"C:\Windows")
@@ -101,16 +111,16 @@ fn ps(script: &str) -> bool {
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
-            "-Command",
-            script,
+            "-EncodedCommand",
+            &encoded,
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn();
     let Ok(mut child) = child else { return false };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -132,7 +142,8 @@ pub fn validate_install() -> io::Result<()> {
             "请在默认 Program Files 目录安装或修复 Windows TUN 组件",
         ));
     }
-    if !ps(r#"
+    if !powershell(
+        r#"
 $ErrorActionPreference = 'Stop'
 $app = 'C:\Program Files\v2rayR'
 $root = "$app\windows-tun"
@@ -141,29 +152,32 @@ $read = [long]([System.Security.AccessControl.FileSystemRights]::ReadAndExecute 
 $paths = @('C:\Program Files', $app, $root, "$root\v2rayr-helper.exe", "$root\sing-box.exe", "$root\wintun.dll", "$root\bundle-v2.sha256")
 if (Test-Path -LiteralPath "$root\run") { $paths += "$root\run" }
 foreach ($p in $paths) {
-  if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 1 }
+  if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse point: $p" }
   $a = Get-Acl -LiteralPath $p
   $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($a.GetSecurityDescriptorBinaryForm(), 0)
-  if ($null -eq $raw.DiscretionaryAcl -or $trusted -notcontains $raw.Owner.Value) { exit 1 }
+  if ($null -eq $raw.DiscretionaryAcl) { throw "Missing DACL: $p" }
+  if ($trusted -notcontains $raw.Owner.Value) { throw "Untrusted owner $($raw.Owner.Value): $p" }
   foreach ($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {
     if (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-    if ($r.AccessControlType -eq 'Allow' -and $trusted -notcontains $r.IdentityReference.Value -and (([long]$r.FileSystemRights -band (-bnot $read)) -ne 0)) { exit 1 }
+    if ($r.AccessControlType -eq 'Allow' -and $trusted -notcontains $r.IdentityReference.Value -and (([long]$r.FileSystemRights -band (-bnot $read)) -ne 0)) { throw "Untrusted write permissions $($r.IdentityReference.Value) $($r.FileSystemRights): $p" }
   }
 }
 # The dedicated executable directory also controls the DLL search path.
 $allowed = @('v2rayr-helper.exe','sing-box.exe','wintun.dll','Wintun-LICENSE.txt','bundle-v2.sha256','run')
-if (Get-ChildItem -LiteralPath $root -Force | Where-Object { $_.Name -notin $allowed }) { exit 1 }
+if (Get-ChildItem -LiteralPath $root -Force | Where-Object { $_.Name -notin $allowed }) { throw "Unexpected files in $root" }
 $files = @('v2rayr-helper.exe','sing-box.exe','wintun.dll')
 $hashes = @(Get-Content -LiteralPath "$root\bundle-v2.sha256")
-if ($hashes.Count -ne ($files.Count + 1)) { exit 1 }
+if ($hashes.Count -ne ($files.Count + 1)) { throw "Invalid bundle manifest" }
 for ($i = 0; $i -lt $files.Count; $i++) {
   $file = $files[$i]
   $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "$root\$file").Hash
-  if ($hashes[$i + 1] -ine "$hash  $file") { exit 1 }
+  if ($hashes[$i + 1] -ine "$hash  $file") { throw "Bundle hash mismatch: $file" }
 }
 exit 0
-"#)
-    {
+"#,
+        Duration::from_secs(20),
+        Stdio::inherit(),
+    ) {
         return Err(invalid(
             "Windows TUN 组件的权限或完整性检查失败，请使用受信任的安装包修复",
         ));
