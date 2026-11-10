@@ -9,9 +9,11 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -21,6 +23,3 @@ v2rayr-engine = { path = "../engine" }
 v2rayr-ipc = { path = "../ipc" }
 v2rayr-platform = { path = "../platform" }
 v2rayr-store = { path = "../store" }
-
-[dev-dependencies]
-tempfile.workspace = true

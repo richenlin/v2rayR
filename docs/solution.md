@@ -726,6 +726,8 @@ Running ──switch──► Restarting ──► Running   （同一内核内�
 | macOS | 遍历 `networksetup -listallnetworkservices` 的活动服务：`-setwebproxy` / `-setsecurewebproxy` / `-setsocksfirewallproxy` + `-setproxybypassdomains`，关闭用 `-setwebproxystate off` 等；**不用 `scutil`**（改动系统配置需管理员，`networksetup` 对当前用户可用） | 退出恢复快照；失败必须向 UI 返回结构化错误（上游 `SysProxyHandler.cs:63-67` catch 后仍 `return true`，用户完全无感，这是 v2rayR 要修的"一等公民"问题） |
 | Linux | GNOME/XFCE/Cinnamon/UKUI/DDE/MATE 走 `gsettings set org.gnome.system.proxy mode 'manual'` + `host`/`port`/`ignore-hosts`；KDE 走 `kwriteconfig6 --file kioslaverc` + `dbus-send` 重载 KIO；未知桌面 → 明确提示"请手动设置代理 127.0.0.1:10808" | 退出恢复；桌面环境探测失败降级为提示 + 复制命令 |
 
+当前实现与候选方案的差异：Windows 先支持 WinINet 默认 LAN，不覆盖 RAS/VPN 专用连接和 WinHTTP；Linux 先支持 GNOME 的 GSettings/dconf，KDE 和其他桌面使用本地端口。验证见 [开发验收记录](delivery-status.md)。
+
 **PAC 模式**：生成 `proxy.pac`（内置模板，按规则返回 `DIRECT`/`PROXY`），开启时同时关闭系统手动代理，避免双重生效。
 
 ### 8.2 TUN 与特权 helper（最复杂的平台能力）

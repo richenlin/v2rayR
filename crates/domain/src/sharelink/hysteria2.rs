@@ -48,11 +48,9 @@ pub fn parse(link: &str) -> Result<Profile, DomainError> {
     );
 
     let mut tls = tls_from(&uri, true).unwrap_or_default();
-    // `pinSHA256` implies certificate pinning; sing-box only exposes
-    // `insecure` and the certificate fields, so a pinned link is marked
-    // insecure and the pin is preserved for a later implementation.
+    // This is a certificate hash, not sing-box's public-key hash. Preserve it
+    // for validation rather than silently downgrading certificate checks.
     if uri.param(&["pinSHA256", "pin"]).is_some() {
-        tls.insecure = true;
         profile.extra =
             serde_json::json!({ "pinned_cert_sha256": uri.param(&["pinSHA256", "pin"]) });
     }

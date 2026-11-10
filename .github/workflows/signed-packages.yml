@@ -1,0 +1,190 @@
+name: Signed release candidates
+
+on:
+  workflow_dispatch:
+    inputs:
+      updater_endpoint:
+        description: HTTPS URL that will serve the approved latest.json
+        required: true
+        type: string
+      asset_base:
+        description: HTTPS base URL where these exact approved payloads will be hosted
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    environment: release-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            id: darwin-aarch64
+          - os: ubuntu-22.04
+            id: linux-x86_64
+          - os: windows-2022
+            id: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Linux bundle prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (!$env:CERT -or !$env:CERT_PASSWORD) { throw "Windows signing certificate is missing" }
+          $path = Join-Path $env:RUNNER_TEMP "v2rayr.pfx"
+          try {
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:CERT))
+            $cert = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force)
+            if (!$cert.HasPrivateKey) { throw "Certificate has no private key" }
+            "V2RAYR_WINDOWS_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+          } finally { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+      - name: Generate pinned updater and signing configuration
+        shell: bash
+        env:
+          UPDATER_ENDPOINT: ${{ inputs.updater_endpoint }}
+          UPDATER_PUBLIC_KEY: ${{ vars.V2RAYR_UPDATER_PUBLIC_KEY }}
+        run: |
+          node --input-type=module <<'JS'
+          import { writeFileSync } from 'node:fs';
+          const endpoint = new URL(process.env.UPDATER_ENDPOINT);
+          if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.hash) throw Error('Updater endpoint must use HTTPS');
+          const pubkey = process.env.UPDATER_PUBLIC_KEY?.trim();
+          if (!pubkey) throw Error('Missing updater public key');
+          const bundle = { createUpdaterArtifacts: true };
+          if (process.platform === 'win32') {
+            const certificateThumbprint = process.env.V2RAYR_WINDOWS_THUMBPRINT;
+            if (!certificateThumbprint) throw Error('Missing Windows signing certificate');
+            bundle.windows = { certificateThumbprint, digestAlgorithm: 'sha256', timestampUrl: 'http://timestamp.digicert.com', tsp: true };
+          }
+          writeFileSync('apps/desktop/tauri.signed.generated.json', JSON.stringify({
+            bundle, plugins: { updater: { pubkey, endpoints: [endpoint.href], requireSignedVersion: true } }
+          }));
+          JS
+      - run: pnpm --dir ui install --frozen-lockfile
+      - run: pnpm --dir ui build
+      - name: Prepare verified proxy cores
+        shell: bash
+        run: bash scripts/stage-desktop-cores.sh
+      - name: Sign and build release candidate
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          if [ "$RUNNER_OS" = macOS ]; then
+            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              if [ -z "${!name}" ]; then echo "Missing $name"; exit 1; fi
+            done
+          fi
+          ../../ui/node_modules/.bin/tauri build --config tauri.signed.generated.json
+      - name: Sign the separate administrator helper archive
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo build --locked --release -p v2rayr-helper
+          version=$(node -p 'require("./apps/desktop/tauri.conf.json").version')
+          mkdir -p apps/desktop/target/release/bundle/helper
+          helper=v2rayr-helper
+          if [ "$RUNNER_OS" = Windows ]; then helper=v2rayr-helper.exe; fi
+          payload="apps/desktop/target/release/bundle/helper/v2rayr-helper-${{ matrix.id }}-${version}.tar.gz"
+          tar -czf "$payload" -C target/release "$helper"
+          ui/node_modules/.bin/tauri signer sign --app-version "$version" "$payload"
+      - name: Verify macOS signing and notarization
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict apps/desktop/target/release/bundle/macos/v2rayR.app
+          xcrun stapler validate apps/desktop/target/release/bundle/macos/v2rayR.app
+      - name: Verify Windows installer signatures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem apps/desktop/target/release/bundle -Recurse -File | Where-Object { $_.Extension -in ".msi", ".exe" }
+          if (!$installers) { throw "No Windows installers found" }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature $installer.FullName
+            if ($signature.Status -ne "Valid") { throw "Invalid Authenticode signature: $($installer.Name)" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-${{ matrix.id }}
+          if-no-files-found: error
+          path: |
+            apps/desktop/target/release/bundle/**/*.dmg
+            apps/desktop/target/release/bundle/**/*.app.tar.gz
+            apps/desktop/target/release/bundle/**/*.msi
+            apps/desktop/target/release/bundle/**/*-setup.exe
+            apps/desktop/target/release/bundle/**/*.AppImage
+            apps/desktop/target/release/bundle/**/*.deb
+            apps/desktop/target/release/bundle/**/*.rpm
+            apps/desktop/target/release/bundle/helper/*.tar.gz
+            apps/desktop/target/release/bundle/**/*.sig
+
+  manifest:
+    needs: bundle
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: signed-*
+          path: signed
+      - name: Verify every packaged update and helper signature
+        shell: bash
+        env:
+          UPDATER_PUBLIC_KEY: ${{ vars.V2RAYR_UPDATER_PUBLIC_KEY }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          printf '%s' "$UPDATER_PUBLIC_KEY" | base64 -d > "$RUNNER_TEMP/v2rayr.pub"
+          count=0
+          while IFS= read -r -d '' signature; do
+            payload="${signature%.sig}"
+            test -f "$payload"
+            base64 -d "$signature" > "$RUNNER_TEMP/v2rayr.minisig"
+            minisign -V -p "$RUNNER_TEMP/v2rayr.pub" -x "$RUNNER_TEMP/v2rayr.minisig" -m "$payload"
+            count=$((count + 1))
+          done < <(find signed -type f -name '*.sig' -print0)
+          test "$count" -ge 7
+      - env:
+          ASSET_BASE: ${{ inputs.asset_base }}
+        run: node scripts/update-manifest.mjs signed "$ASSET_BASE" latest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-updater-manifest
+          path: latest.json

@@ -67,7 +67,15 @@ pub struct InboundSettings {
     /// a fixed port the user asked for, and a conflict is surfaced instead of
     /// being silently replaced.
     pub mixed_port: u16,
+    #[serde(default)]
+    pub dokodemo_listen_port: u16,
+    #[serde(default)]
+    pub dokodemo_address: String,
+    #[serde(default)]
+    pub dokodemo_target_port: u16,
     pub allow_lan: bool,
+    #[serde(default)]
+    pub lan_bind: String,
     pub bypass_local: bool,
     /// Extra bypass rules, one domain or IP per line.
     pub bypass_extra: String,
@@ -78,7 +86,11 @@ impl Default for InboundSettings {
     fn default() -> Self {
         Self {
             mixed_port: 0,
+            dokodemo_listen_port: 0,
+            dokodemo_address: String::new(),
+            dokodemo_target_port: 0,
             allow_lan: false,
+            lan_bind: String::new(),
             bypass_local: true,
             bypass_extra: String::new(),
             tun_enabled: false,

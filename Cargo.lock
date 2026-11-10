@@ -1489,6 +1489,7 @@ name = "v2rayr-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -1532,6 +1533,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "url",
  "uuid",
  "v2rayr-domain",
 ]
@@ -1577,12 +1579,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
  "v2rayr-domain",
  "v2rayr-engine",
  "v2rayr-platform",
@@ -1610,8 +1614,11 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
+ "uuid",
  "v2rayr-domain",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

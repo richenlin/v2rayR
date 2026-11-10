@@ -1,21 +1,22 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icon";
 import { Field, SearchInput, Select, Toggle } from "../components/Controls";
-import { useLang, useStore, useT } from "../store";
+import { problemTextSafe, useLang, useStore, useT } from "../store";
 import type {
-  AdvancedSettings,
   AppearanceSettings,
+  CoreOverride,
   InboundSettings,
   RoutingSettings,
   SettingsGroupId,
   StartupSettings,
   SubscriptionSettings,
 } from "../lib/types";
-import { resetPreviewData } from "../lib/api";
+import { api, resetPreviewData, type BackupPreview } from "../lib/api";
 import { isPreview } from "../lib/api";
 import type { RuleView } from "../lib/types";
 
-type Group = SettingsGroupId | "diagnostics";
+type EditableGroup = Exclude<SettingsGroupId, "advanced">;
+type Group = EditableGroup | "diagnostics";
 
 const groups: Array<{ id: Group; labelKey: string }> = [
   { id: "startup", labelKey: "settings.group.startup" },
@@ -23,8 +24,7 @@ const groups: Array<{ id: Group; labelKey: string }> = [
   { id: "routing", labelKey: "settings.group.routing" },
   { id: "subscription", labelKey: "settings.group.subscription" },
   { id: "appearance", labelKey: "settings.group.appearance" },
-  { id: "advanced", labelKey: "settings.group.advanced" },
-  { id: "diagnostics", labelKey: "settings.cores" },
+  { id: "diagnostics", labelKey: "settings.group.maintenance" },
 ];
 
 interface GroupDraft {
@@ -33,12 +33,40 @@ interface GroupDraft {
   routing: RoutingSettings;
   subscription: SubscriptionSettings;
   appearance: AppearanceSettings;
-  advanced: AdvancedSettings;
 }
 
 
 const RULE_KINDS = ["domain", "domain-suffix", "ip-cidr", "process", "geoip", "geosite"] as const;
 const RULE_ACTIONS = ["direct", "proxy", "block"] as const;
+
+function PacUpdate() {
+  const t = useT();
+  const lang = useLang();
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState("");
+  async function update() {
+    setBusy(true);
+    setResult("");
+    try {
+      const count = await api.updatePac();
+      setResult(t("settings.pac.updated", { count }));
+    } catch (error) {
+      setResult(error && typeof error === "object" && "code" in error
+        ? problemTextSafe(lang, error as Parameters<typeof problemTextSafe>[1])
+        : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Field label={t("settings.pac")} hint={t("settings.pac.hint")}>
+      <button type="button" className="btn btn-outline btn-sm" disabled={busy} onClick={() => void update()}>
+        {t("settings.pac.update")}
+      </button>
+      {result ? <p role="status" className="field-hint">{result}</p> : null}
+    </Field>
+  );
+}
 
 function RulesEditor() {
   const t = useT();
@@ -124,6 +152,126 @@ function RulesEditor() {
   );
 }
 
+function Maintenance() {
+  const t = useT();
+  const refresh = useStore((state) => state.refresh);
+  const phase = useStore((state) => state.snapshot?.connection.phase);
+  const [backup, setBackup] = useState<BackupPreview | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [remote, setRemote] = useState(false);
+  const [url, setUrl] = useState("");
+  const [user, setUser] = useState("");
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState("");
+  useEffect(() => { void api.updatesConfigured().then(setEnabled).catch(() => {}); }, []);
+  const run = async (operation: () => Promise<void>) => {
+    setPending(true);
+    setStatus("");
+    try { await operation(); }
+    catch (error) {
+      setStatus((error && typeof error === "object" && "detail" in error && typeof error.detail === "string")
+        ? error.detail : t("maintenance.failed"));
+    } finally { setPending(false); }
+  };
+  return (
+    <>
+      <div className="field">
+        <div>
+          <div className="field-label">{t("maintenance.backup")}</div>
+          <p className="field-hint">{t("maintenance.backupHint")}</p>
+        </div>
+        <div className="field-control is-inline" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-outline btn-sm" disabled={pending} onClick={() => void run(async () => {
+            if (await api.exportBackup()) setStatus(t("maintenance.saved"));
+          })}>{t("maintenance.export")}</button>
+          <button className="btn btn-outline btn-sm" disabled={pending} onClick={() => void run(async () => {
+            const selected = await api.previewBackup();
+            if (selected) setBackup(selected);
+          })}>{t("maintenance.preview")}</button>
+        </div>
+      </div>
+      <div className="field">
+        <div>
+          <div className="field-label">WebDAV</div>
+          <p className="field-hint">{t("maintenance.webdavHint")}</p>
+        </div>
+        <div className="field-control is-inline">
+          <button className="btn btn-outline btn-sm" disabled={pending} aria-expanded={remote} onClick={() => {
+            setRemote(!remote);
+            setPassword("");
+          }}>WebDAV</button>
+        </div>
+      </div>
+      {remote ? (
+        <div className="field">
+          <div style={{ display: "grid", gap: 6 }}>
+            <label htmlFor="backup-webdav-url">{t("maintenance.webdavUrl")}</label>
+            <input id="backup-webdav-url" className="control" placeholder="https://dav.example/backup.json" value={url}
+              onChange={(event) => setUrl(event.target.value)} />
+            <label htmlFor="backup-webdav-user">{t("maintenance.webdavUser")}</label>
+            <input id="backup-webdav-user" className="control" value={user} autoComplete="off"
+              onChange={(event) => setUser(event.target.value)} />
+            {user ? <>
+              <label htmlFor="backup-webdav-password">{t("maintenance.webdavPassword")}</label>
+              <input id="backup-webdav-password" className="control" type="password" value={password} autoComplete="off"
+                onChange={(event) => setPassword(event.target.value)} />
+            </> : null}
+          </div>
+          <div className="field-control is-inline" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn btn-outline btn-sm" disabled={pending || !url.trim()} onClick={() => void run(async () => {
+              try { setBackup(await api.readWebDav(url.trim(), user || undefined, user ? password : undefined)); }
+              finally { setPassword(""); }
+            })}>{t("maintenance.webdavRead")}</button>
+            <button className="btn btn-outline btn-sm" disabled={pending || !url.trim()} onClick={() => void run(async () => {
+              try { await api.createWebDav(url.trim(), user || undefined, user ? password : undefined); setStatus(t("maintenance.saved")); }
+              finally { setPassword(""); }
+            })}>{t("maintenance.webdavCreate")}</button>
+          </div>
+        </div>
+      ) : null}
+      {backup ? (
+        <div className="field">
+          <div>
+            <b>{t("maintenance.restore")}</b>
+            <p className="field-hint">{t("maintenance.restoreHint")} · {backup.summary.rules}</p>
+            {phase !== "disconnected" ? <p className="field-hint">{t("maintenance.disconnectFirst")}</p> : null}
+          </div>
+          <div className="field-control is-inline" style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-outline btn-sm" disabled={pending} onClick={() => setBackup(null)}>{t("common.cancel")}</button>
+            <button className="btn btn-solid btn-sm" disabled={pending || phase !== "disconnected"} onClick={() => void run(async () => {
+              const added = await api.applyBackup(backup.content);
+              setBackup(null);
+              await refresh();
+              setStatus(t("maintenance.restored") + " · " + added);
+            })}>{t("common.confirm")}</button>
+          </div>
+        </div>
+      ) : null}
+      {enabled ? (
+        <div className="field">
+          <div>
+            <div className="field-label">{t("maintenance.update")}</div>
+            <p className="field-hint">{version ? t("maintenance.updateAvailable") + " · " + version : t("maintenance.updateHint")}</p>
+          </div>
+          <div className="field-control is-inline" style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-outline btn-sm" disabled={pending} onClick={() => void run(async () => {
+              const available = await api.checkUpdate();
+              setVersion(available);
+              if (!available) setStatus(t("maintenance.upToDate"));
+            })}>{t("maintenance.check")}</button>
+            {version ? <button className="btn btn-solid btn-sm" disabled={pending} onClick={() => void run(async () => {
+              await api.installUpdate(version);
+            })}>{t("maintenance.install")}</button> : null}
+          </div>
+        </div>
+      ) : null}
+      {pending || status ? <p className="field-hint" role="status">{pending ? t("maintenance.working") : status}</p> : null}
+    </>
+  );
+}
+
 export function SettingsPage() {
   const t = useT();
   const lang = useLang();
@@ -150,15 +298,14 @@ export function SettingsPage() {
     }));
   };
 
-  const dirty = group !== "diagnostics" && drafts[group as SettingsGroupId] !== undefined;
   const term = search.trim().toLowerCase();
 
   const matches = (...keys: string[]): boolean =>
     term.length === 0 || keys.some((key) => t(key).toLowerCase().includes(term));
 
   const save = async () => {
-    if (group === "diagnostics") return;
-    const key = group as SettingsGroupId;
+    if (activeGroup === "diagnostics") return;
+    const key = activeGroup;
     const ok = await saveSettings([{ group: key, values: draftOf(key) as unknown as Record<string, unknown> }]);
     if (ok) {
       setDrafts((current) => {
@@ -174,13 +321,12 @@ export function SettingsPage() {
     const hit = (keys: string[]) => keys.some((key) => t(key).toLowerCase().includes(term));
     return new Set<Group>(
       [
-        hit(["settings.launchAtLogin", "settings.connectOnLaunch", "settings.startMinimized", "settings.closeToTray", "settings.showTrayIcon", "settings.singleInstance"]) ? "startup" : null,
-        hit(["settings.mixedPort", "settings.allowLan", "settings.bypassLocal", "settings.bypassExtra", "settings.tunEnabled"]) ? "inbound" : null,
-        hit(["settings.policy", "settings.ruleSet", "settings.blockAds", "settings.dnsStrategy", "settings.dnsServers", "settings.fakeIp", "settings.rules"]) ? "routing" : null,
-        hit(["settings.interval", "settings.updateOnStart", "settings.concurrency", "settings.timeout", "settings.userAgent", "settings.keepRemoved"]) ? "subscription" : null,
+        hit(["settings.launchAtLogin", "settings.connectOnLaunch", "settings.closeToTray"]) ? "startup" : null,
+        hit(["settings.mixedPort", "settings.bypassLocal", "settings.bypassExtra", "settings.allowLan", "settings.lanBind", "settings.dokodemo"]) ? "inbound" : null,
+        hit(["settings.ruleSet", "settings.blockAds", "settings.dnsServers", "settings.rules", "settings.pac"]) ? "routing" : null,
+        hit(["settings.interval"]) ? "subscription" : null,
         hit(["settings.theme", "settings.language", "settings.compact", "settings.reduceMotion"]) ? "appearance" : null,
-        hit(["settings.coreOverride", "settings.logLevel", "settings.tunMtu", "settings.sniffing", "settings.tcpFastOpen", "settings.mux", "settings.muxConcurrency"]) ? "advanced" : null,
-        hit(["settings.cores", "settings.paths", "settings.reset", "settings.version"]) ? "diagnostics" : null,
+        hit(["settings.cores", "settings.paths", "settings.reset", "settings.version", "maintenance.backup", "maintenance.update"]) ? "diagnostics" : null,
       ].filter((value): value is Group => value !== null),
     );
   }, [term, lang, t]);
@@ -188,6 +334,7 @@ export function SettingsPage() {
   const showGroup = (id: Group): boolean => !term || (groupsWithMatches?.has(id) ?? false);
   const activeGroup = showGroup(group) ? group : groups.find((entry) => showGroup(entry.id))?.id ?? "inbound";
 
+  const dirty = activeGroup !== "diagnostics" && drafts[activeGroup] !== undefined;
   const body = (() => {
     switch (activeGroup) {
       case "startup": {
@@ -208,24 +355,9 @@ export function SettingsPage() {
                 <Toggle checked={value.connectOnLaunch} label={t("settings.connectOnLaunch")} onChange={(checked) => patch("startup", { connectOnLaunch: checked })} />
               </Field>
             ) : null}
-            {matches("settings.startMinimized") ? (
-              <Field label={t("settings.startMinimized")} inline>
-                <Toggle checked={value.startMinimized} label={t("settings.startMinimized")} onChange={(checked) => patch("startup", { startMinimized: checked })} />
-              </Field>
-            ) : null}
             {matches("settings.closeToTray") ? (
               <Field label={t("settings.closeToTray")} inline>
                 <Toggle checked={value.closeToTray} label={t("settings.closeToTray")} onChange={(checked) => patch("startup", { closeToTray: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.showTrayIcon") ? (
-              <Field label={t("settings.showTrayIcon")} inline>
-                <Toggle checked={value.showTrayIcon} label={t("settings.showTrayIcon")} onChange={(checked) => patch("startup", { showTrayIcon: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.singleInstance") ? (
-              <Field label={t("settings.singleInstance")} inline>
-                <Toggle checked={value.singleInstance} label={t("settings.singleInstance")} onChange={(checked) => patch("startup", { singleInstance: checked })} />
               </Field>
             ) : null}
           </>
@@ -264,15 +396,40 @@ export function SettingsPage() {
                 />
               </Field>
             ) : null}
-            {matches("settings.allowLan", "settings.allowLan.hint") ? (
+
+            {matches("settings.allowLan", "settings.allowLan.hint", "settings.lanBind") ? (
               <Field label={t("settings.allowLan")} hint={t("settings.allowLan.hint")} inline>
                 <Toggle checked={value.allowLan} label={t("settings.allowLan")} onChange={(checked) => patch("inbound", { allowLan: checked })} />
               </Field>
             ) : null}
-            {matches("settings.tunEnabled", "settings.tunEnabled.hint") ? (
-              <Field label={t("settings.tunEnabled")} hint={t("settings.tunEnabled.hint")} inline>
-                <Toggle checked={value.tunEnabled} label={t("settings.tunEnabled")} onChange={(checked) => patch("inbound", { tunEnabled: checked })} />
+            {value.allowLan && matches("settings.lanBind", "settings.allowLan") ? (
+              <Field label={t("settings.lanBind")} hint={t("settings.lanBind.hint")} htmlFor="lan-bind">
+                <input id="lan-bind" className="control control-mono" value={value.lanBind ?? ""}
+                  placeholder="192.168.1.20" onChange={(event) => patch("inbound", { lanBind: event.target.value })} />
               </Field>
+            ) : null}
+            {matches("settings.dokodemo", "settings.dokodemo.hint") ? (
+              <details open={Boolean(term || value.dokodemoListenPort)}>
+                <summary className="field-label">{t("settings.dokodemo")}</summary>
+                <Field label={t("settings.dokodemo.listen")} hint={t("settings.dokodemo.hint")} htmlFor="dokodemo-listen">
+                  <input id="dokodemo-listen" className="control" type="number" min={0} max={65535}
+                    value={value.dokodemoListenPort}
+                    onChange={(event) => patch("inbound", { dokodemoListenPort: Number(event.target.value) })} />
+                </Field>
+                {value.dokodemoListenPort ? (
+                  <>
+                    <Field label={t("settings.dokodemo.address")} htmlFor="dokodemo-address">
+                      <input id="dokodemo-address" className="control" value={value.dokodemoAddress}
+                        onChange={(event) => patch("inbound", { dokodemoAddress: event.target.value })} />
+                    </Field>
+                    <Field label={t("settings.dokodemo.port")} htmlFor="dokodemo-port">
+                      <input id="dokodemo-port" className="control" type="number" min={1} max={65535}
+                        value={value.dokodemoTargetPort}
+                        onChange={(event) => patch("inbound", { dokodemoTargetPort: Number(event.target.value) })} />
+                    </Field>
+                  </>
+                ) : null}
+              </details>
             ) : null}
           </>
         );
@@ -281,21 +438,6 @@ export function SettingsPage() {
         const value = draftOf("routing");
         return (
           <>
-            {matches("settings.policy", "settings.policy.hint") ? (
-              <Field label={t("settings.policy")} hint={t("settings.policy.hint")} htmlFor="routing-policy-setting">
-                <Select
-                  id="routing-policy-setting"
-                  label={t("settings.policy")}
-                  value={value.policy}
-                  onChange={(next) => patch("routing", { policy: next })}
-                  options={[
-                    { value: "rule", label: t("connection.policy.rule") },
-                    { value: "global", label: t("connection.policy.global") },
-                    { value: "direct", label: t("connection.policy.direct") },
-                  ]}
-                />
-              </Field>
-            ) : null}
             {matches("settings.ruleSet", "settings.ruleSet.hint") ? (
               <Field label={t("settings.ruleSet")} hint={t("settings.ruleSet.hint")} inline>
                 <Toggle checked={value.ruleSetEnabled} label={t("settings.ruleSet")} onChange={(checked) => patch("routing", { ruleSetEnabled: checked })} />
@@ -306,23 +448,9 @@ export function SettingsPage() {
                 <Toggle checked={value.blockAds} label={t("settings.blockAds")} onChange={(checked) => patch("routing", { blockAds: checked })} />
               </Field>
             ) : null}
-            {matches("settings.dnsStrategy", "settings.dnsStrategy.hint") ? (
-              <Field label={t("settings.dnsStrategy")} hint={t("settings.dnsStrategy.hint")} htmlFor="dns-strategy">
-                <Select
-                  id="dns-strategy"
-                  label={t("settings.dnsStrategy")}
-                  value={value.dnsStrategy}
-                  onChange={(next) => patch("routing", { dnsStrategy: next })}
-                  options={[
-                    { value: "prefer_ipv4", label: "prefer_ipv4" },
-                    { value: "prefer_ipv6", label: "prefer_ipv6" },
-                    { value: "ipv4_only", label: "ipv4_only" },
-                    { value: "ipv6_only", label: "ipv6_only" },
-                  ]}
-                />
-              </Field>
-            ) : null}
             {matches("settings.dnsServers", "settings.dnsServers.hint") ? (
+              <details open={Boolean(term || value.dnsServers.trim())}>
+                <summary className="field-label" style={{ cursor: "pointer", padding: "14px 0" }}>{t("settings.customDns")}</summary>
               <Field label={t("settings.dnsServers")} hint={t("settings.dnsServers.hint")} htmlFor="dns-servers">
                 <textarea
                   id="dns-servers"
@@ -332,13 +460,10 @@ export function SettingsPage() {
                   onChange={(event) => patch("routing", { dnsServers: event.target.value })}
                 />
               </Field>
-            ) : null}
-            {matches("settings.fakeIp", "settings.fakeIp.hint") ? (
-              <Field label={t("settings.fakeIp")} hint={t("settings.fakeIp.hint")} inline>
-                <Toggle checked={value.fakeIp} label={t("settings.fakeIp")} onChange={(checked) => patch("routing", { fakeIp: checked })} />
-              </Field>
+              </details>
             ) : null}
             {matches("settings.rules", "settings.rules.hint") ? <RulesEditor /> : null}
+            {!isPreview && matches("settings.pac", "settings.pac.hint") ? <PacUpdate /> : null}
           </>
         );
       }
@@ -357,52 +482,6 @@ export function SettingsPage() {
                   value={value.intervalHours}
                   onChange={(event) => patch("subscription", { intervalHours: Number(event.target.value) })}
                 />
-              </Field>
-            ) : null}
-            {matches("settings.updateOnStart") ? (
-              <Field label={t("settings.updateOnStart")} inline>
-                <Toggle checked={value.updateOnStart} label={t("settings.updateOnStart")} onChange={(checked) => patch("subscription", { updateOnStart: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.concurrency", "settings.concurrency.hint") ? (
-              <Field label={t("settings.concurrency")} hint={t("settings.concurrency.hint")} htmlFor="sub-concurrency">
-                <input
-                  id="sub-concurrency"
-                  className="control control-mono"
-                  type="number"
-                  min={1}
-                  max={16}
-                  value={value.concurrency}
-                  onChange={(event) => patch("subscription", { concurrency: Number(event.target.value) })}
-                />
-              </Field>
-            ) : null}
-            {matches("settings.timeout") ? (
-              <Field label={t("settings.timeout")} htmlFor="sub-timeout">
-                <input
-                  id="sub-timeout"
-                  className="control control-mono"
-                  type="number"
-                  min={1}
-                  max={120}
-                  value={value.timeoutSecs}
-                  onChange={(event) => patch("subscription", { timeoutSecs: Number(event.target.value) })}
-                />
-              </Field>
-            ) : null}
-            {matches("settings.userAgent", "settings.userAgent.hint") ? (
-              <Field label={t("settings.userAgent")} hint={t("settings.userAgent.hint")} htmlFor="sub-agent">
-                <input
-                  id="sub-agent"
-                  className="control control-mono"
-                  value={value.userAgent}
-                  onChange={(event) => patch("subscription", { userAgent: event.target.value })}
-                />
-              </Field>
-            ) : null}
-            {matches("settings.keepRemoved", "settings.keepRemoved.hint") ? (
-              <Field label={t("settings.keepRemoved")} hint={t("settings.keepRemoved.hint")} inline>
-                <Toggle checked={value.keepRemovedNodes} label={t("settings.keepRemoved")} onChange={(checked) => patch("subscription", { keepRemovedNodes: checked })} />
               </Field>
             ) : null}
           </>
@@ -455,89 +534,6 @@ export function SettingsPage() {
           </>
         );
       }
-      case "advanced": {
-        const value = draftOf("advanced");
-        return (
-          <>
-            {matches("settings.coreOverride", "settings.coreOverride.hint") ? (
-              <Field label={t("settings.coreOverride")} hint={t("settings.coreOverride.hint")} htmlFor="core-override">
-                <Select
-                  id="core-override"
-                  label={t("settings.coreOverride")}
-                  value={value.coreOverride}
-                  onChange={(next) => patch("advanced", { coreOverride: next })}
-                  options={[
-                    { value: "auto", label: "auto" },
-                    { value: "sing-box", label: "sing-box" },
-                    { value: "xray", label: "Xray" },
-                    { value: "mihomo", label: "mihomo" },
-                  ]}
-                />
-              </Field>
-            ) : null}
-            {matches("settings.logLevel") ? (
-              <Field label={t("settings.logLevel")} htmlFor="log-level">
-                <Select
-                  id="log-level"
-                  label={t("settings.logLevel")}
-                  value={value.logLevel}
-                  onChange={(next) => patch("advanced", { logLevel: next })}
-                  options={[
-                    { value: "error", label: "error" },
-                    { value: "warn", label: "warn" },
-                    { value: "info", label: "info" },
-                    { value: "debug", label: "debug" },
-                    { value: "trace", label: "trace" },
-                  ]}
-                />
-              </Field>
-            ) : null}
-            {matches("settings.tunMtu", "settings.tunMtu.hint") ? (
-              <Field label={t("settings.tunMtu")} hint={draftOf("inbound").tunEnabled ? t("settings.tunMtu.hint") : `${t("settings.tunMtu.hint")}（${t("connection.mode.tun")}）`} htmlFor="tun-mtu" disabled={!draftOf("inbound").tunEnabled}>
-                <input
-                  id="tun-mtu"
-                  className="control control-mono"
-                  type="number"
-                  min={1280}
-                  max={9000}
-                  disabled={!draftOf("inbound").tunEnabled}
-                  value={value.tunMtu}
-                  onChange={(event) => patch("advanced", { tunMtu: Number(event.target.value) })}
-                />
-              </Field>
-            ) : null}
-            {matches("settings.sniffing", "settings.sniffing.hint") ? (
-              <Field label={t("settings.sniffing")} hint={t("settings.sniffing.hint")} inline>
-                <Toggle checked={value.sniffing} label={t("settings.sniffing")} onChange={(checked) => patch("advanced", { sniffing: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.tcpFastOpen") ? (
-              <Field label={t("settings.tcpFastOpen")} inline>
-                <Toggle checked={value.tcpFastOpen} label={t("settings.tcpFastOpen")} onChange={(checked) => patch("advanced", { tcpFastOpen: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.mux", "settings.mux.hint") ? (
-              <Field label={t("settings.mux")} hint={t("settings.mux.hint")} inline>
-                <Toggle checked={value.muxEnabled} label={t("settings.mux")} onChange={(checked) => patch("advanced", { muxEnabled: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.muxConcurrency") ? (
-              <Field label={t("settings.muxConcurrency")} htmlFor="mux-concurrency" disabled={!value.muxEnabled}>
-                <input
-                  id="mux-concurrency"
-                  className="control control-mono"
-                  type="number"
-                  min={1}
-                  max={256}
-                  disabled={!value.muxEnabled}
-                  value={value.muxConcurrency}
-                  onChange={(event) => patch("advanced", { muxConcurrency: Number(event.target.value) })}
-                />
-              </Field>
-            ) : null}
-          </>
-        );
-      }
       default:
         return (
           <>
@@ -553,6 +549,20 @@ export function SettingsPage() {
                 </button>
               </div>
             </div>
+            {!isPreview ? <Maintenance /> : null}
+            <Field label={t("settings.cores.selection")} hint={t("settings.cores.selectionHint")} htmlFor="core-selection">
+              <select id="core-selection" className="control" disabled={busy !== null}
+                value={snapshot.settings.advanced.coreOverride}
+                onChange={(event) => void saveSettings([{
+                  group: "advanced",
+                  values: { ...snapshot.settings.advanced, coreOverride: event.target.value as CoreOverride },
+                }])}>
+                <option value="auto">{t("settings.cores.auto")}</option>
+                {snapshot.cores.map((core) => (
+                  <option key={core.kind} value={core.kind} disabled={!core.installed}>{core.kind}</option>
+                ))}
+              </select>
+            </Field>
             {snapshot.cores.map((core) => (
               <div key={core.kind} className="field">
                 <div>
@@ -568,8 +578,8 @@ export function SettingsPage() {
                   {core.installed ? (
                     <span className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{core.version ?? "—"}</span>
                   ) : (
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => void installCore(core.kind)}>
-                      {t("settings.cores.install")}
+                    <button type="button" className="btn btn-outline btn-sm" disabled={busy !== null} onClick={() => void installCore(core.kind)}>
+                      {busy === "install-core" ? t("connection.installingCore") : t("settings.cores.install")}
                     </button>
                   )}
                 </div>
@@ -645,10 +655,9 @@ export function SettingsPage() {
               <div>
                 <h2 className="settings-group-title">{t(groups.find((entry) => entry.id === activeGroup)?.labelKey ?? "settings.title")}</h2>
                 <p className="field-hint" style={{ marginTop: 4 }}>
-                  {activeGroup === "diagnostics" ? t("settings.restartHint") : t("settings.reconnectHint")}
+                  {activeGroup === "inbound" || activeGroup === "routing" ? t("settings.reconnectHint") : t("settings.restartHint")}
                 </p>
               </div>
-              <span className="badge">M4</span>
             </div>
             <div>
               {groupHasContent ? body : (
@@ -668,7 +677,7 @@ export function SettingsPage() {
                   className="btn btn-outline"
                   disabled={!dirty || busy === "settings"}
                   onClick={() => {
-                    const key = activeGroup as SettingsGroupId;
+                    const key = activeGroup;
                     setDrafts((current) => {
                       const next = { ...current };
                       delete next[key];
@@ -680,7 +689,7 @@ export function SettingsPage() {
                 </button>
                 <button type="button" className="btn btn-solid" disabled={!dirty || busy === "settings"} onClick={() => void save()}>
                   {busy === "settings" ? <Icon name="refresh" size={14} className="spin" /> : null}
-                  {t("settings.saveReconnect")}
+                  {t(activeGroup === "inbound" || activeGroup === "routing" ? "settings.saveReconnect" : "common.save")}
                 </button>
               </div>
             </div>

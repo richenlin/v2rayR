@@ -215,7 +215,18 @@ fn mihomo_supports(profile: &Profile) -> Result<(), ConfigError> {
                 return fail("shadowsocks 2022 needs sing-box".to_owned());
             }
         }
-        Protocol::Hysteria2 { .. } | Protocol::Tuic(_) => {}
+        Protocol::Hysteria2 { obfs, .. } => {
+            if profile.extra.get("pinned_cert_sha256").is_some() {
+                return fail("当前无法校验 Hysteria2 链接中的 pinSHA256 证书指纹".into());
+            }
+            if obfs
+                .as_ref()
+                .is_some_and(|obfs| obfs.kind == v2rayr_domain::ObfsKind::Gecko)
+            {
+                return fail("Hysteria2 Gecko 混淆需要 sing-box".into());
+            }
+        }
+        Protocol::Tuic(_) => {}
         _ => {
             return fail(format!(
                 "mihomo has no {} outbound in this build",

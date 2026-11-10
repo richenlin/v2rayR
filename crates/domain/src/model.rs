@@ -221,18 +221,21 @@ impl fmt::Display for SsMethod {
 #[serde(rename_all = "kebab-case")]
 pub enum ObfsKind {
     Salamander,
+    Gecko,
 }
 
 impl ObfsKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Salamander => "salamander",
+            Self::Gecko => "gecko",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "salamander" => Some(Self::Salamander),
+            "gecko" => Some(Self::Gecko),
             _ => None,
         }
     }

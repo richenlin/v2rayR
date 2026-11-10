@@ -194,7 +194,42 @@ impl Settings {
     }
 
     pub fn validate(&self) -> Result<(), Problem> {
+        if self.inbound.allow_lan
+            && !self
+                .inbound
+                .lan_bind
+                .trim()
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|address| address.is_private())
+        {
+            return Err(invalid(
+                "inbound.lanBind",
+                "请填写本机可信网络接口的私有 IPv4 地址".into(),
+            ));
+        }
         let port = self.inbound.mixed_port;
+        if self.inbound.dokodemo_listen_port != 0 {
+            let host = self.inbound.dokodemo_address.trim();
+            let valid_host = host.parse::<std::net::IpAddr>().is_ok()
+                || (!host.is_empty()
+                    && host.len() <= 253
+                    && host.split('.').all(|label| {
+                        !label.is_empty()
+                            && label.len() <= 63
+                            && label
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    }));
+            if self.inbound.dokodemo_listen_port < 1024
+                || self.inbound.dokodemo_target_port == 0
+                || !valid_host
+            {
+                return Err(invalid(
+                    "inbound.dokodemoListenPort",
+                    "请填写 1024–65535 的本地端口，以及有效的目标域名或 IP 和目标端口".into(),
+                ));
+            }
+        }
         if port != 0 && port < 1024 {
             return Err(invalid(
                 "inbound.mixedPort",
@@ -330,20 +365,18 @@ pub fn migrate(mut value: Value, from: u32) -> Result<Value, String> {
 }
 
 pub fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp = path.with_extension("tmp");
-    {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(body)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&temp, path)?;
-    // Make the rename itself durable, not just the contents.
-    if let Some(parent) = path.parent()
-        && let Ok(dir) = std::fs::File::open(parent)
-    {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    // NamedTempFile creates an exclusive private file instead of truncating a
+    // predictable path. Kernel configs can contain passwords and private keys.
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(body)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|failure| failure.error)?;
+    if let Ok(dir) = std::fs::File::open(parent) {
         let _ = dir.sync_all();
     }
     Ok(())

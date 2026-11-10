@@ -18,6 +18,7 @@ fn connection_state_field_names() {
         phase: ConnectionPhase::Connected,
         policy: RoutingPolicy::Global,
         takeover_applied: true,
+        lan: None,
         ..ConnectionState::default()
     };
     let json: Value = serde_json::to_value(&state).expect("serialize");
@@ -40,6 +41,7 @@ fn snapshot_is_camel_case_and_carries_the_pages_data() {
             commit: None,
         },
         connection: ConnectionState::default(),
+        tun_available: false,
         settings: SettingsView::default(),
         active_node: None,
         nodes: vec![NodeView {

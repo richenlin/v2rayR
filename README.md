@@ -1,6 +1,6 @@
 # v2rayR
 
-macOS 上的代理客户端：Rust 负责节点、订阅、内核与系统接管，React 负责工作台界面。
+面向 macOS、Windows 和 Linux 的代理客户端：Rust 负责节点、订阅、内核与系统接管，React 负责工作台界面。
 界面语言中文优先，也提供英文；浅色与深色两套主题跟随系统，可手动覆盖。
 
 > 目标不是「又一个订阅转换器」，而是把三件容易出错的事做对：
@@ -24,13 +24,13 @@ macOS 上的代理客户端：Rust 负责节点、订阅、内核与系统接管
 - **节点**：导入 vless / vmess / trojan / ss / socks / http / hysteria2 / tuic / wireguard / anytls / naive 分享链接，
   支持整段 base64 与多行文本；按连接指纹去重，保留收藏、标签与延迟记录；10k 节点虚拟滚动。
 - **订阅**：链接列表、base64 列表、SIP-008 JSON、Clash YAML、sing-box JSON 五类载荷；按指纹合并
-  （新增 / 原地更新 / 删除非收藏），失败只记录错误并保留旧节点；记录配额与到期时间；按间隔自动检查。
+  （新增 / 原地更新 / 删除非收藏），失败只记录错误并保留旧节点；记录配额与到期时间；按间隔自动检查（桌面运行时）。
   原生配置里被跳过的条目会逐条给出原因，一处都无法导入时直接报错而不是清空节点。
 - **内核**：sing-box（默认）、Xray（VLESS + xhttp / mKCP 等场景）、mihomo（可选）；可在设置里下载/升级，
-  固定版本 + 可选 SHA-256 校验，解压后原子替换。配置由强类型构建器生成 → 内核 `check`/`-test`/`-t` 自检
-  （失败时把内核原话翻译成一句可行动的提示）→ 原子落盘 → 启动 → 等端口就绪。
-- **接管**：系统代理 / PAC（本机脚本，按域名绕行）/ 手动端口；写入前先快照、失败即回滚、断开按所有权恢复。
-  TUN 需要特权 helper，未安装时如实失败并给出下一步，而不是假装已连接。
+  固定版本 + SHA-256 校验，解压后原子替换。配置由强类型构建器生成 → 内核 `check`/`-test`/`-t` 自检
+  （失败时把内核原话翻译成一句可行动的提示）→ 原子落盘 → 启动 → 通过本地 HTTP 代理验证链路，再接管。
+- **接管**：macOS、GNOME Linux 与 Windows 默认 LAN 的系统代理 / PAC（本机脚本，按域名绕行），以及手动端口；写入前先持久化恢复记录，接管与恢复均读回，恢复失败保留记录。
+  TUN 使用管理员部署的独立 helper，详见 [Linux](docs/tun-linux.md) 与 [macOS / Windows](docs/tun-desktop.md)。认证 LAN 使用独立端口和临时凭据。
 - **分流**：内置规则集 + 图形化自定义规则（域名 / 后缀 / 网段 / 进程 / GeoIP / GeoSite，直连·代理·拦截），
   改动即时保存、下次连接生效。
 - **桌面**：开机启动（LaunchAgent）、关闭窗口保留连接、单实例锁 + 托盘菜单（显示 / 重连 / 断开 / 退出）、
@@ -89,12 +89,15 @@ cd ui && pnpm install && pnpm dev     # http://localhost:1420
 # 4. 桌面壳（需要 tauri-cli 与完整工具链）
 cargo install tauri-cli --version "^2"
 pnpm --dir ui build                 # 先把 UI 打包并内联成单文件
+bash scripts/stage-desktop-cores.sh # 下载、校验并准备当前平台的内置内核
 cd apps/desktop && cargo tauri build   # 产出 .app 与 .dmg
 ```
 
 CLI 常用命令：`status`、`nodes`、`import <file|->`、`sub add/update/list`、`connect/disconnect/run`、`test`、
 `export`、`cores`、`logs`、`paths`。`connect` 是自检语义（连上随后断开），需要常驻连接用 `run`；
 `test` 不做代理，只测到节点的 TCP 延迟。所有命令接受 `--json`。
+
+桌面安装包内置 Xray 和 sing-box，桌面版优先使用包内的版本，无需首次下载，也不会被用户目录下的同名内核覆盖。Mihomo 仍按需安装。TUN 特权助手使用单独部署的内核。
 
 ## 数据目录
 
@@ -126,7 +129,7 @@ logs/                     内核日志与应用日志
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 265 个测试
+cargo test --workspace                     # 常规回归
 cd ui && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite build
 ```
 
@@ -136,11 +139,12 @@ CI 与本地一致：见 [.github/workflows/ci.yml](.github/workflows/ci.yml) �
 
 - 桌面壳（`apps/desktop`）不在 workspace 内，需要 `tauri-cli` 与网络代理拉取依赖；CI 里有独立的 build job。
 - Clash / sing-box 原生配置只支持常见出站类型；不支持的协议、插件与传输方式会被跳过并给出原因。
-- TUN 模式需要以 root 运行的 helper 创建虚拟网卡；当前 helper 只覆盖系统代理与自启动，
-  因此 TUN 会如实返回 `permission_denied` 并建议改用系统代理或 PAC，而不是假装已连接。
+- TUN 当前使用全局分流和固定 IPv4 的 sing-box 节点。macOS 与 Windows 接入已有实现，仍需本机提权、真实接管和恢复验收。
 - 规则集（`*.srs`）不随仓库分发，放入 `data/rules/` 后才会被引用；否则规则模式只用内置私有网段与自定义规则。
-- 开机自启目前只写 LaunchAgent，没有图形化引导；托盘菜单已在桌面壳内实现，但本机无法编译验证。
-- 自动更新、备份/WebDAV 属于发布期能力，本仓库未实现。
+- 开机自启使用 macOS LaunchAgent、Windows 当前用户 Run 键和 Linux XDG 桌面入口。Linux 已验证 GSettings 配置往返；Windows WinINet 和两平台安装包仍需原生验收。
+- LAN 认证适用于 sing-box 和 Xray。便携备份与 HTTPS WebDAV 仅保存白名单偏好和规则。
+- 签名应用更新与签名候选包见 [发布配置](docs/signed-release.md)；正式证书、公网更新源及实机升级验收尚未配置。
+- 本机验证和未通过的发行门槛见 [开发验收记录](docs/delivery-status.md)。
 
 ## 许可
 

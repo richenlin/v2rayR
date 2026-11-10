@@ -141,17 +141,20 @@ fn proxy_to_profile(proxy: &Yaml) -> Result<Profile, String> {
             obfs: proxy
                 .get("obfs")
                 .and_then(Yaml::as_str)
-                .map(|_kind| Hysteria2Obfs {
-                    // sing-box only ships salamander; an unknown name still maps
-                    // there rather than failing the whole subscription.
-                    kind: ObfsKind::Salamander,
-                    password: Secret::new(
-                        proxy
-                            .get("obfs-password")
-                            .and_then(Yaml::as_str)
-                            .unwrap_or_default(),
-                    ),
-                }),
+                .filter(|kind| !kind.is_empty())
+                .map(|kind| {
+                    Ok::<_, String>(Hysteria2Obfs {
+                        kind: ObfsKind::parse(kind)
+                            .ok_or_else(|| "不支持的 Hysteria2 混淆类型".to_owned())?,
+                        password: Secret::new(
+                            proxy
+                                .get("obfs-password")
+                                .and_then(Yaml::as_str)
+                                .unwrap_or_default(),
+                        ),
+                    })
+                })
+                .transpose()?,
             up_mbps: proxy.get("up").and_then(Yaml::as_u64).map(|v| v as u32),
             down_mbps: proxy.get("down").and_then(Yaml::as_u64).map(|v| v as u32),
             ports: proxy.get("ports").and_then(Yaml::as_str).map(str::to_owned),

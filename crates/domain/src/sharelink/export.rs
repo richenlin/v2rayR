@@ -89,22 +89,72 @@ pub fn export_share_link(profile: &Profile) -> Option<String> {
                 pct_encode(remark)
             )
         }
+        Protocol::Http { username, password } => {
+            let auth = username
+                .as_ref()
+                .map_or_else(String::new, |user| match password {
+                    Some(password) => {
+                        format!("{}:{}@", pct_encode(user), pct_encode(password.expose()))
+                    }
+                    None => format!("{}@", pct_encode(user)),
+                });
+            let scheme = if profile.tls.is_some() {
+                "https-proxy"
+            } else {
+                "http-proxy"
+            };
+            let mut params = Vec::new();
+            if let Some(tls) = &profile.tls {
+                if let Some(sni) = &tls.sni {
+                    params.push(("sni".into(), sni.clone()));
+                }
+                if tls.insecure {
+                    params.push(("insecure".into(), "1".into()));
+                }
+            }
+            format!(
+                "{scheme}://{auth}{}:{}?{}#{}",
+                host_for_uri(&profile.address),
+                profile.port,
+                encode_query(&params),
+                pct_encode(remark)
+            )
+        }
         Protocol::Hysteria2 {
             password,
             obfs,
+            up_mbps,
+            down_mbps,
             ports,
-            ..
         } => {
             let mut params: Vec<(String, String)> = Vec::new();
             if let Some(obfs) = obfs {
-                params.push(("obfs".into(), "salamander".into()));
+                params.push(("obfs".into(), obfs.kind.as_str().into()));
                 params.push(("obfs-password".into(), obfs.password.expose().to_owned()));
             }
             if let Some(ports) = ports {
                 params.push(("mport".into(), ports.clone()));
             }
-            if let Some(sni) = profile.tls.as_ref().and_then(|tls| tls.sni.clone()) {
-                params.push(("sni".into(), sni));
+            if let Some(up) = up_mbps {
+                params.push(("upmbps".into(), up.to_string()));
+            }
+            if let Some(down) = down_mbps {
+                params.push(("downmbps".into(), down.to_string()));
+            }
+            if let Some(tls) = &profile.tls {
+                if let Some(sni) = &tls.sni {
+                    params.push(("sni".into(), sni.clone()));
+                }
+                if tls.insecure {
+                    params.push(("insecure".into(), "1".into()));
+                }
+            }
+            if let Some(pin) = profile
+                .extra
+                .get("pinned_cert_sha256")
+                .and_then(Value::as_str)
+            {
+                params.push(("pinSHA256".into(), pin.to_owned()));
             }
             format!(
                 "hysteria2://{}@{}:{}?{}#{}",

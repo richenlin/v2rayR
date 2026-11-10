@@ -39,3 +39,5 @@ v2rayr-ipc = { path = "../../crates/ipc" }
 v2rayr-platform = { path = "../../crates/platform" }
 v2rayr-store = { path = "../../crates/store" }
 uuid = { version = "1", features = ["serde", "v4"] }
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"

@@ -30,9 +30,10 @@ impl ClashClient {
             base: format!("http://127.0.0.1:{port}"),
             secret: secret.into(),
             http: reqwest::Client::builder()
+                .no_proxy()
                 .timeout(Duration::from_secs(3))
                 .build()
-                .unwrap_or_default(),
+                .expect("valid loopback HTTP client"),
         }
     }
 
@@ -99,6 +100,33 @@ impl ClashClient {
             .and_then(Value::as_array)
             .map(|items| items.len() as u64)
             .unwrap_or(0))
+    }
+
+    /// Cumulative byte counters include connections that already closed.
+    pub async fn traffic_totals(&self) -> Result<crate::traffic::Counters, EngineError> {
+        let value: Value = self
+            .request(reqwest::Method::GET, "/connections")
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| EngineError::ControlApi(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| EngineError::ControlApi(error.to_string()))?;
+        let counter = |key| {
+            value
+                .get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| EngineError::ControlApi(format!("missing traffic counter {key}")))
+        };
+        Ok(crate::traffic::Counters {
+            down: counter("downloadTotal")?,
+            up: counter("uploadTotal")?,
+            connections: value
+                .get("connections")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len() as u64),
+        })
     }
 
     /// Latency of one outbound as measured *through* the kernel.

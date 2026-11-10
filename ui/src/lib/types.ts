@@ -26,6 +26,7 @@ export interface Problem {
   code: string;
   key: string;
   detail?: string;
+  requiredCore?: CoreKind;
   retryable: boolean;
 }
 
@@ -93,9 +94,11 @@ export interface ConnectionState {
   core?: CoreKind;
   inboundPort?: number;
   apiPort?: number;
+  pacUrl?: string;
   startedAt?: string;
   takeoverApplied: boolean;
-  takeoverError?: string;
+  lan?: { address: string; socksPort: number; httpPort: number };
+  takeoverError?: Problem | string;
   error?: Problem;
 }
 
@@ -126,7 +129,11 @@ export interface StartupSettings {
 
 export interface InboundSettings {
   mixedPort: number;
+  dokodemoListenPort: number;
+  dokodemoAddress: string;
+  dokodemoTargetPort: number;
   allowLan: boolean;
+  lanBind?: string;
   bypassLocal: boolean;
   bypassExtra: string;
   tunEnabled: boolean;
@@ -211,6 +218,7 @@ export interface VersionInfo {
 export interface AppSnapshot {
   version: VersionInfo;
   connection: ConnectionState;
+  tunAvailable?: boolean;
   settings: SettingsView;
   activeNode?: NodeView;
   nodes: NodeView[];

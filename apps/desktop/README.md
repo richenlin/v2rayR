@@ -20,12 +20,15 @@ Tauri 2 外壳。这里刻意只做三件事：
 cd ../..                      # 回到仓库根
 pnpm --dir ui install
 pnpm --dir ui build           # 或者用 cargo tauri dev 让它自己起
+bash scripts/stage-desktop-cores.sh  # 准备校验过的本机架构内核
 cd apps/desktop
 cargo tauri dev
 cargo tauri build             # .app / .dmg
 ```
 
 需要 `cargo install tauri-cli --version "^2"`。
+
+发行包内置 sing-box 和 Xray，内核与应用一同升级。准备脚本须在目标平台运行；它使用仓库固定的版本及 SHA-256，缺少内核、许可文件或 Xray 地理数据时会失败。
 
 ## 已知缺口
 

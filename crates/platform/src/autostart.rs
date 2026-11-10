@@ -2,8 +2,8 @@
 //!
 //! macOS: a user LaunchAgent (`~/Library/LaunchAgents/com.v2rayr.app.plist`) —
 //! no admin rights, removable by deleting one file, and it inherits the app's
-//! sandbox-free environment. Linux/Windows return `Unsupported` rather than
-//! pretending to work.
+//! sandbox-free environment. Linux uses an XDG desktop entry; Windows uses
+//! the per-user Run registry key.
 
 use std::path::{Path, PathBuf};
 
@@ -132,8 +132,150 @@ mod tests {
     }
 
     #[test]
+    fn desktop_entry_quotes_paths_and_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("autostart/v2rayr.desktop");
+        let backend = DesktopEntryAutostart::new(path.clone());
+        backend
+            .set_enabled(true, Path::new("/opt/My App/100%$x"))
+            .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains(r#"Exec="/opt/My App/100%%\\$x" --background"#));
+        backend.set_enabled(false, Path::new("")).unwrap();
+        assert!(!backend.is_enabled());
+    }
+
+    #[test]
     fn plist_escapes_xml_metacharacters() {
         let plist = render_plist(Path::new("/Applications/A&B <x>.app/app"));
         assert!(plist.contains("A&amp;B &lt;x&gt;.app"));
+    }
+}
+
+/// Register the installed executable with the current user's login mechanism.
+pub fn set_login_start(enabled: bool, program: &Path) -> Result<(), PlatformError> {
+    #[cfg(target_os = "macos")]
+    return LaunchAgentAutostart::system()?.set_enabled(enabled, program);
+    #[cfg(target_os = "linux")]
+    {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or_else(|| PlatformError::InvalidState("未找到用户配置目录".into()))?;
+        return DesktopEntryAutostart::new(config.join("autostart/v2rayr.desktop"))
+            .set_enabled(enabled, program);
+    }
+    #[cfg(windows)]
+    return windows::set_enabled(enabled, program);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    Err(PlatformError::Unsupported("当前平台不支持登录时启动"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug)]
+pub struct DesktopEntryAutostart {
+    path: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl DesktopEntryAutostart {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Autostart for DesktopEntryAutostart {
+    fn is_enabled(&self) -> bool {
+        self.path.is_file()
+    }
+
+    fn set_enabled(&self, enabled: bool, program: &Path) -> Result<(), PlatformError> {
+        use std::io::Write;
+        if !enabled {
+            return match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        let path = program
+            .to_str()
+            .filter(|_| program.is_absolute())
+            .ok_or_else(|| PlatformError::InvalidState("登录项需要有效的绝对路径".into()))?;
+        if path.chars().any(char::is_control) {
+            return Err(PlatformError::InvalidState("登录项路径包含控制字符".into()));
+        }
+        // Exec quoting is applied after desktop-entry backslash escaping.
+        let exec: String = path
+            .chars()
+            .flat_map(|ch| match ch {
+                '%' => vec!['%', '%'],
+                '"' | '`' | '$' => vec!['\\', '\\', ch],
+                '\\' => vec!['\\', '\\', '\\', '\\'],
+                _ => vec![ch],
+            })
+            .collect();
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| PlatformError::InvalidState("登录项目录无效".into()))?;
+        std::fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        write!(
+            temp,
+            "[Desktop Entry]\nType=Application\nName=v2rayR\nExec=\"{exec}\" --background\nTerminal=false\n"
+        )?;
+        temp.as_file().sync_all()?;
+        temp.persist(&self.path).map_err(|failure| failure.error)?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+
+    const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+    pub(super) fn set_enabled(enabled: bool, program: &Path) -> Result<(), PlatformError> {
+        let command = |args: &[&str]| std::process::Command::new("reg.exe").args(args).output();
+        let name = "v2rayR";
+        let queried = command(&["query", KEY, "/v", name])?;
+        if !enabled && !queried.status.success() {
+            // Missing value is an idempotent disable; inability to read the
+            // containing key is not enough evidence of that.
+            if command(&["query", KEY])?.status.success() {
+                return Ok(());
+            }
+            return Err(PlatformError::InvalidState(
+                "无法读取 Windows 登录启动项".into(),
+            ));
+        }
+        let output = if enabled {
+            let path = program
+                .to_str()
+                .filter(|_| program.is_absolute())
+                .ok_or_else(|| PlatformError::InvalidState("登录项需要有效的绝对路径".into()))?;
+            if path.contains('"') || path.chars().any(char::is_control) {
+                return Err(PlatformError::InvalidState("Windows 登录项路径无效".into()));
+            }
+            let value = format!("\"{path}\" --background");
+            if value.encode_utf16().count() > 260 {
+                return Err(PlatformError::InvalidState("Windows 登录项路径过长".into()));
+            }
+            command(&["add", KEY, "/v", name, "/t", "REG_SZ", "/d", &value, "/f"])?
+        } else {
+            command(&["delete", KEY, "/v", name, "/f"])?
+        };
+        if !output.status.success()
+            || command(&["query", KEY, "/v", name])?.status.success() != enabled
+        {
+            return Err(PlatformError::InvalidState(
+                "Windows 登录启动项未通过读回验证".into(),
+            ));
+        }
+        Ok(())
     }
 }

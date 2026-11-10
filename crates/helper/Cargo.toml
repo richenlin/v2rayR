@@ -16,9 +16,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
 v2rayr-domain = { path = "../domain" }
 v2rayr-engine = { path = "../engine" }
 v2rayr-platform = { path = "../platform" }
-
-[dev-dependencies]
-tempfile.workspace = true

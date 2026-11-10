@@ -119,6 +119,28 @@ pub fn parse_share_link(input: &str) -> Result<Profile, DomainError> {
         "trojan" | "trojan-go" => trojan::parse(link),
         "ss" | "shadowsocks" => ss::parse(link),
         "socks" | "socks5" | "socks4" => socks::parse(link),
+        "http-proxy" | "https-proxy" => {
+            let uri = Uri::split(link)?;
+            if !uri.path.is_empty() && uri.path != "/" {
+                return Err(invalid("path", "HTTP 代理地址不能包含路径"));
+            }
+            let (username, password) = uri.user_pass();
+            let tls = uri.scheme == "https-proxy";
+            let mut profile = Profile::new(
+                remark_of(&uri, "http"),
+                uri.host.clone(),
+                uri.port_or(if tls { 443 } else { 80 }),
+                crate::model::Protocol::Http {
+                    username,
+                    password: password.map(crate::model::Secret::new),
+                },
+            );
+            if tls {
+                profile.tls = Some(tls_from(&uri, true).unwrap_or_default());
+            }
+            profile.validate()?;
+            Ok(profile)
+        }
         "hysteria2" | "hy2" => hysteria2::parse(link),
         "tuic" => tuic::parse(link),
         "wireguard" | "wg" => wireguard::parse(link),
@@ -359,6 +381,27 @@ mod tests {
     fn http_links_are_reported_as_subscriptions() {
         let error = parse_share_link("https://example.com/sub").expect_err("must fail");
         assert_eq!(error.code(), ErrorCode::NotAProfileLink);
+    }
+
+    #[test]
+    fn explicit_http_proxy_link_round_trips_without_becoming_a_subscription() {
+        let input = "https-proxy://alice:p%40ss@[2001:db8::1]:8443?sni=proxy.example#HTTP";
+        let imported = parse_share_links(input);
+        assert!(imported.failures.is_empty());
+        assert!(imported.subscription_urls.is_empty());
+        let profile = &imported.profiles[0];
+        assert!(matches!(
+            &profile.protocol,
+            crate::model::Protocol::Http { .. }
+        ));
+        let exported = export_share_link(profile).unwrap();
+        let round_trip = parse_share_link(&exported).unwrap();
+        assert_eq!(round_trip.protocol, profile.protocol);
+        assert_eq!(round_trip.tls, profile.tls);
+        assert_eq!(
+            (round_trip.address, round_trip.port),
+            (profile.address.clone(), profile.port)
+        );
     }
 
     #[test]

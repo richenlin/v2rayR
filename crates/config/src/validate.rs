@@ -30,7 +30,12 @@ fn validate_json(core: CoreKind, value: &Value) -> Result<(), ConfigError> {
     }
 
     let mut tags = Vec::new();
-    for outbound in outbounds {
+    let endpoints = value
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    for outbound in outbounds.iter().chain(endpoints) {
         let tag = outbound
             .get("tag")
             .and_then(Value::as_str)

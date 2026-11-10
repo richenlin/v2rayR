@@ -1,9 +1,7 @@
 //! One window per user, even when the icon is clicked twice.
 //!
-//! A lock file is enough: the file holds the owning pid, and a second start
-//! either finds a live pid (and hands off) or a stale file (and takes over).
-//! Doing this without a socket keeps the failure modes boring — no port to
-//! collide with, no listener to leak.
+//! The OS owns the lock for the lifetime of an open file descriptor.
+//! The PID is advisory for the second launch; stale PID text never owns a lock.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,18 +22,12 @@ pub enum InstanceOutcome {
 #[derive(Debug)]
 pub struct InstanceGuard {
     path: PathBuf,
+    _file: fs::File,
 }
 
 impl InstanceGuard {
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl Drop for InstanceGuard {
-    fn drop(&mut self) {
-        // Best effort: a leftover file is detected as stale on the next start.
-        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -49,42 +41,109 @@ pub fn acquire(lock: &Path) -> Result<InstanceOutcome, PlatformError> {
         fs::create_dir_all(parent).map_err(PlatformError::Io)?;
     }
 
-    if let Some(pid) = read_pid(lock) {
-        if is_alive(pid) {
-            return Ok(InstanceOutcome::AlreadyRunning(pid));
-        }
+    lock_instance(lock)
+}
+
+fn lock_instance(lock: &Path) -> Result<InstanceOutcome, PlatformError> {
+    use std::io::Write;
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock)?;
+    if !try_lock(&file)? {
+        return Ok(InstanceOutcome::AlreadyRunning(read_pid(lock).unwrap_or(0)));
     }
-
-    fs::write(lock, format!("{}\n", std::process::id())).map_err(PlatformError::Io)?;
-
+    #[cfg(windows)]
+    {
+        use std::io::{Seek, SeekFrom};
+        file.set_len(1)?;
+        file.seek(SeekFrom::Start(1))?;
+    }
+    #[cfg(unix)]
+    file.set_len(0)?;
+    writeln!(&mut file, "{}", std::process::id())?;
+    // Do not unlink a locked inode: another process could lock a new inode at
+    // the same path while the first one still owns its descriptor.
     Ok(InstanceOutcome::Primary(InstanceGuard {
         path: lock.to_path_buf(),
+        _file: file,
     }))
 }
 
-fn read_pid(lock: &Path) -> Option<u32> {
-    let text = fs::read_to_string(lock).ok()?;
-    text.trim().parse().ok()
-}
-
-/// `kill(pid, 0)` is the portable "is this pid alive" probe on unix; on other
-/// platforms we fall back to assuming a foreign lock is live, which can only be
-/// fixed by removing the file.
 #[cfg(unix)]
-fn is_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 performs error checking only and delivers nothing.
-    unsafe {
-        libc::kill(pid, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+fn try_lock(file: &fs::File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the file owns this live descriptor; closing it releases the lock.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(false)
+    } else {
+        Err(error)
     }
 }
 
-#[cfg(not(unix))]
-fn is_alive(_pid: u32) -> bool {
-    true
+#[cfg(windows)]
+fn try_lock(file: &fs::File) -> std::io::Result<bool> {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle};
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut c_void,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LockFileEx(
+            handle: *mut c_void,
+            flags: u32,
+            reserved: u32,
+            low: u32,
+            high: u32,
+            data: *mut Overlapped,
+        ) -> i32;
+    }
+    // Lock byte 0 only; PID text begins at byte 1, so other readers can report
+    // the PID without requiring permission to read the locked byte.
+    let mut data = Overlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: 0,
+        offset_high: 0,
+        event: std::ptr::null_mut(),
+    };
+    // SAFETY: synchronous handle, live OVERLAPPED and one byte at offset zero.
+    if unsafe { LockFileEx(file.as_raw_handle(), 3, 0, 1, 0, &mut data) } != 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(33) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+fn read_pid(lock: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    let text = fs::read_to_string(lock).ok()?;
+    #[cfg(windows)]
+    let text = {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = fs::File::open(lock).ok()?;
+        file.seek(SeekFrom::Start(1)).ok()?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).ok()?;
+        text
+    };
+    text.trim().parse().ok()
 }
 
 #[cfg(test)]

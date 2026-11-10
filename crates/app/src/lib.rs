@@ -6,10 +6,12 @@
 //! a second, thinner adapter — which is how the "same engine, two front ends"
 //! promise stays honest.
 
+pub mod backup;
 pub mod error;
 pub mod importer;
 pub mod latency;
 pub mod logging;
+mod pac_rules;
 mod rules;
 pub mod session;
 pub mod settings;
@@ -26,8 +28,7 @@ use v2rayr_config::{RuleKind as ConfigRuleKind, choose_core};
 use v2rayr_domain::{CoreKind, Profile};
 use v2rayr_ipc::{
     API_VERSION, AppSnapshot, CoreStatus, EventName, LogEntry, NodeView, Problem, QuotaView,
-    SettingsPatch, SettingsView, SubscriptionView, TrafficPoint, TrafficTick, TrafficView,
-    VersionInfo,
+    SettingsPatch, SettingsView, SubscriptionView, TrafficView, VersionInfo,
 };
 use v2rayr_platform::{AppPaths, SystemProxy};
 use v2rayr_store::{
@@ -107,6 +108,8 @@ pub struct AppOptions {
     pub events: Arc<dyn EventSink>,
     pub proxy: Arc<dyn SystemProxy>,
     pub cores: Option<v2rayr_engine::CoreBinaries>,
+    bundled_cores: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    probe_url: String,
 }
 
 impl AppOptions {
@@ -114,9 +117,16 @@ impl AppOptions {
         Self {
             version: version.into(),
             events: Arc::new(NullEvents),
-            proxy: Arc::new(v2rayr_platform::MacOsSystemProxy::system()),
+            proxy: v2rayr_platform::proxy::system_proxy(),
             cores: None,
+            bundled_cores: None,
+            probe_url: "https://www.gstatic.com/generate_204".to_owned(),
         }
+    }
+
+    pub fn with_probe_url(mut self, url: impl Into<String>) -> Self {
+        self.probe_url = url.into();
+        self
     }
 
     pub fn with_events(mut self, events: Arc<dyn EventSink>) -> Self {
@@ -133,6 +143,15 @@ impl AppOptions {
         self.cores = Some(cores);
         self
     }
+
+    pub fn with_bundled_cores(
+        mut self,
+        binaries: std::path::PathBuf,
+        xray_assets: std::path::PathBuf,
+    ) -> Self {
+        self.bundled_cores = Some((binaries, xray_assets));
+        self
+    }
 }
 
 pub struct App {
@@ -143,12 +162,15 @@ pub struct App {
     settings_revision: AtomicU64,
     pub(crate) session: Mutex<SessionRuntime>,
     pub(crate) op_lock: tokio::sync::Mutex<()>,
+    subscription_refresh_lock: tokio::sync::Mutex<()>,
     pub(crate) events: Arc<dyn EventSink>,
     pub(crate) logs: Arc<LogBus>,
     pub(crate) proxy: Arc<dyn SystemProxy>,
     pub(crate) cores: RwLock<v2rayr_engine::CoreBinaries>,
+    pub(crate) bundled_cores: Option<(std::path::PathBuf, std::path::PathBuf)>,
     warnings: Mutex<Vec<String>>,
     version: String,
+    probe_url: String,
 }
 
 impl App {
@@ -157,9 +179,15 @@ impl App {
         let db = Database::open(paths.database()).map_err(error::from_store)?;
         let sealer = open_sealer(&paths.secrets_dir()).map_err(error::from_store)?;
         let LoadedSettings { settings, warnings } = Settings::load(&paths.settings());
-        let cores = options
-            .cores
-            .unwrap_or_else(|| v2rayr_engine::CoreBinaries::discover(&paths));
+        let cores = options.cores.unwrap_or_else(|| {
+            v2rayr_engine::CoreBinaries::discover_with_bundle(
+                &paths,
+                options
+                    .bundled_cores
+                    .as_ref()
+                    .map(|(binaries, _)| binaries.as_path()),
+            )
+        });
         let logs = LogBus::new();
         for warning in &warnings {
             logs.warn("settings", warning.clone());
@@ -172,13 +200,17 @@ impl App {
             settings_revision: AtomicU64::new(1),
             session: Mutex::new(SessionRuntime::new()),
             op_lock: tokio::sync::Mutex::new(()),
+            subscription_refresh_lock: tokio::sync::Mutex::new(()),
             events: options.events,
             logs,
             proxy: options.proxy,
             cores: RwLock::new(cores),
+            bundled_cores: options.bundled_cores,
             warnings: Mutex::new(warnings),
             version: options.version,
+            probe_url: options.probe_url,
         });
+        app.set_idle_policy(app.settings().policy());
         app.recover_takeover();
         Ok(app)
     }
@@ -225,53 +257,80 @@ impl App {
         &self,
         patches: &[SettingsPatch],
     ) -> Result<AppSnapshot, Problem> {
-        let was_connected = self
-            .session
-            .lock()
-            .expect("session")
-            .connection_state()
-            .phase
-            == v2rayr_ipc::ConnectionPhase::Connected;
-        let mut snapshot = self.snapshot()?;
+        let _guard = self.op_lock.lock().await;
+        let previous = self.settings();
+        let mut next = previous.clone();
         for patch in patches {
-            snapshot = self.settings_patch(patch)?;
+            next.apply(patch)?;
         }
-        let needs_reconnect = patches.iter().any(|patch| {
-            matches!(
-                patch.group,
-                v2rayr_ipc::SettingsGroupId::Inbound
-                    | v2rayr_ipc::SettingsGroupId::Routing
-                    | v2rayr_ipc::SettingsGroupId::Advanced
-            )
-        });
-        if was_connected && needs_reconnect {
-            let connection = snapshot.connection.clone();
-            if let (Some(profile_id), Some(mode)) = (connection.profile_id, Some(connection.mode)) {
-                let policy = connection.policy;
-                self.disconnect().await?;
-                self.logs.info("settings", "按新设置重连");
-                return self
-                    .connect(ConnectionRequest {
-                        profile_id,
-                        mode,
-                        policy,
-                    })
-                    .await;
-            }
-        }
-        Ok(snapshot)
+        self.apply_settings_locked(previous, next).await
     }
 
-    pub fn settings_reset(&self) -> Result<AppSnapshot, Problem> {
-        let defaults = Settings::default();
-        defaults
-            .save(&self.paths.settings())
-            .map_err(|error| error::internal(format!("无法保存设置: {error}")))?;
-        *self.settings.write().expect("settings") = defaults;
-        self.settings_revision.fetch_add(1, Ordering::Relaxed);
-        self.logs.warn("settings", "设置已恢复默认值");
+    async fn apply_settings_locked(
+        &self,
+        previous: Settings,
+        next: Settings,
+    ) -> Result<AppSnapshot, Problem> {
+        if next == previous {
+            return self.snapshot();
+        }
+        let request = self.active_request().filter(|_| {
+            next.inbound != previous.inbound
+                || next.routing != previous.routing
+                || next.advanced != previous.advanced
+        });
+        let autostart_changed = next.startup.launch_at_login != previous.startup.launch_at_login;
+        if autostart_changed {
+            apply_autostart(&next)?;
+        }
+        if let Err(problem) = self.commit_settings(next) {
+            if autostart_changed {
+                let _ = apply_autostart(&previous);
+            }
+            return Err(problem);
+        }
+        if let Some(request) = request {
+            if let Err(problem) = self.disconnect_locked().await {
+                self.restore_settings(previous)?;
+                return Err(problem);
+            }
+            if let Err(problem) = self.connect_locked(&request).await {
+                self.restore_settings(previous)?;
+                // A failed takeover can leave a recovery journal. Repair it
+                // before starting the previous configuration.
+                if self.disconnect_locked().await.is_ok() {
+                    let _ = self.connect_locked(&request).await;
+                }
+                self.emit_session();
+                return Err(problem);
+            }
+        }
+        self.logs.info("settings", "设置已保存");
         self.emit_session();
         self.snapshot()
+    }
+
+    fn commit_settings(&self, next: Settings) -> Result<(), Problem> {
+        next.save(&self.paths.settings())
+            .map_err(|error| Problem::storage(format!("无法保存设置: {error}")))?;
+        *self.settings.write().expect("settings") = next;
+        self.settings_revision.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn restore_settings(&self, previous: Settings) -> Result<(), Problem> {
+        let startup = self.settings().startup.launch_at_login != previous.startup.launch_at_login;
+        self.commit_settings(previous.clone())?;
+        if startup {
+            apply_autostart(&previous)?;
+        }
+        Ok(())
+    }
+
+    pub async fn settings_reset(&self) -> Result<AppSnapshot, Problem> {
+        let _guard = self.op_lock.lock().await;
+        self.apply_settings_locked(self.settings(), Settings::default())
+            .await
     }
 
     /// Kernel status for the settings page. Versions are probed lazily by
@@ -362,7 +421,12 @@ impl App {
     }
 
     pub fn rescan_cores(&self) {
-        let discovered = v2rayr_engine::CoreBinaries::discover(&self.paths);
+        let discovered = v2rayr_engine::CoreBinaries::discover_with_bundle(
+            &self.paths,
+            self.bundled_cores
+                .as_ref()
+                .map(|(binaries, _)| binaries.as_path()),
+        );
         *self.cores.write().expect("cores") = discovered;
     }
 
@@ -479,6 +543,7 @@ impl App {
         Ok(AppSnapshot {
             version: self.version_info(),
             connection,
+            tun_available: v2rayr_platform::tun::provisioned(),
             settings: settings.view(self.settings_revision.load(Ordering::Relaxed)),
             active_node,
             nodes,
@@ -491,50 +556,54 @@ impl App {
 
     /// One traffic tick: read the control API, persist totals, emit.
     pub async fn poll_traffic(&self) -> Option<TrafficView> {
-        let (api_port, secret, connected) = {
-            let session = self.session.lock().expect("session");
-            (
-                session.api_port(),
-                session.api_secret().to_owned(),
-                session.phase() == v2rayr_ipc::ConnectionPhase::Connected,
-            )
-        };
-        if !connected {
+        if self.check_kernel_exit().await {
             return None;
         }
-        let port = api_port?;
-        let client = v2rayr_engine::ClashClient::new(port, secret);
-        let sample = match client.sample().await {
-            Ok(sample) => sample,
+        let (port, secret, xray) = {
+            let session = self.session.lock().expect("session");
+            if session.phase() != v2rayr_ipc::ConnectionPhase::Connected {
+                return None;
+            }
+            (
+                session.api_port()?,
+                session.api_secret().to_owned(),
+                session.traffic_program.clone(),
+            )
+        };
+        let counters = if let Some(program) = xray {
+            v2rayr_engine::traffic::xray_totals(&program, port).await
+        } else {
+            v2rayr_engine::ClashClient::new(port, secret.clone())
+                .traffic_totals()
+                .await
+        };
+        let counters = match counters {
+            Ok(counters) => counters,
             Err(error) => {
                 self.logs.warn("traffic", format!("读取流量失败: {error}"));
                 return None;
             }
         };
+        let at = std::time::Instant::now();
         let now = Utc::now();
+        let _guard = self.op_lock.try_lock().ok()?;
+        let (view, (down, up)) = {
+            let mut session = self.session.lock().expect("session");
+            if session.phase() != v2rayr_ipc::ConnectionPhase::Connected
+                || session.api_port() != Some(port)
+                || session.api_secret() != secret
+            {
+                return None;
+            }
+            let delta = session.record_counters(at, now.timestamp_millis(), counters)?;
+            (session.traffic_view(), delta)
+        };
         {
             let db = self.db.lock().expect("db");
-            let _ = db.add_totals(sample.down_bps, sample.up_bps);
-            let _ = db.record_traffic(now, sample.down_bps, sample.up_bps);
+            let _ = db.add_totals(down, up);
+            let _ = db.record_traffic(now, down, up);
             let _ = db.prune_traffic(now - chrono::Duration::hours(2));
         }
-        let tick = {
-            let mut session = self.session.lock().expect("session");
-            session.push_sample(TrafficPoint {
-                ts: now.timestamp_millis(),
-                down_bps: sample.down_bps,
-                up_bps: sample.up_bps,
-            });
-            TrafficTick {
-                down_bps: sample.down_bps,
-                up_bps: sample.up_bps,
-                total_down_bytes: session.total_down,
-                total_up_bytes: session.total_up,
-                connections: u32::try_from(sample.connections).unwrap_or(u32::MAX),
-                samples: session.samples(),
-            }
-        };
-        let view = TrafficView::from(tick);
         self.events.emit(EventName::TRAFFIC, json!(view));
         Some(view)
     }
@@ -636,27 +705,29 @@ impl App {
         };
         match serde_json::from_str::<v2rayr_platform::TakeoverSnapshot>(&raw) {
             Ok(snapshot) => {
-                // Only repair what we still own; a user who changed the proxy in
-                // the meantime must not have their choice reverted.
-                match self.proxy.capture() {
-                    Ok(current) if snapshot.still_applied(&current.services) => {
-                        if let Err(error) = self.proxy.restore(&snapshot) {
-                            self.logs.warn(
-                                "takeover",
-                                format!("上次异常退出后的系统代理未能恢复: {error}"),
-                            );
+                let result = if snapshot.target.is_some() {
+                    self.proxy.restore(&snapshot)
+                } else {
+                    self.proxy.capture().and_then(|current| {
+                        if snapshot.still_applied(&current.services) {
+                            self.proxy.restore(&snapshot)
                         } else {
-                            self.logs.info("takeover", "已恢复上次异常退出前的系统代理");
+                            Ok(())
                         }
+                    })
+                };
+                match result {
+                    Ok(()) => {
+                        self.clear_takeover_journal();
+                        self.logs
+                            .info("takeover", "已检查并恢复上次会话持有的系统代理");
                     }
-                    Ok(_) => self
-                        .logs
-                        .info("takeover", "系统代理已被外部修改，保留当前设置"),
-                    Err(error) => self
-                        .logs
-                        .warn("takeover", format!("无法读取系统代理状态: {error}")),
+                    Err(error) => {
+                        self.logs
+                            .warn("takeover", format!("上次会话的系统代理未能恢复: {error}"));
+                        self.keep_recovery(snapshot, session::recovery_problem(error));
+                    }
                 }
-                let _ = std::fs::remove_file(&path);
             }
             Err(error) => {
                 self.logs
@@ -666,21 +737,18 @@ impl App {
         }
     }
 
-    pub(crate) fn persist_takeover(&self, snapshot: Option<&v2rayr_platform::TakeoverSnapshot>) {
-        let path = self.paths.takeover_snapshot();
-        match snapshot {
-            Some(snapshot) => {
-                if let Ok(body) = serde_json::to_vec_pretty(snapshot) {
-                    if let Err(error) = write_atomic(&path, &body) {
-                        self.logs
-                            .warn("takeover", format!("无法写入接管快照: {error}"));
-                    }
-                }
-            }
-            None => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
+    pub(crate) fn write_takeover_journal(
+        &self,
+        snapshot: &v2rayr_platform::TakeoverSnapshot,
+    ) -> Result<(), v2rayr_platform::PlatformError> {
+        let body = serde_json::to_vec_pretty(snapshot)
+            .map_err(|error| v2rayr_platform::PlatformError::InvalidState(error.to_string()))?;
+        write_atomic(&self.paths.takeover_snapshot(), &body)?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_takeover_journal(&self) {
+        let _ = std::fs::remove_file(self.paths.takeover_snapshot());
     }
 
     /// The profile the last session used, for "connect on launch".
@@ -808,12 +876,9 @@ pub fn config_rule_kind(kind: v2rayr_store::RuleKind) -> ConfigRuleKind {
 fn apply_autostart(settings: &Settings) -> Result<(), Problem> {
     #[cfg(not(test))]
     {
-        use v2rayr_platform::autostart::{Autostart, LaunchAgentAutostart};
-        let autostart = LaunchAgentAutostart::system().map_err(error::from_platform)?;
         let program = std::env::current_exe()
             .map_err(|error| error::internal(format!("无法定位可执行文件: {error}")))?;
-        autostart
-            .set_enabled(settings.startup.launch_at_login, &program)
+        v2rayr_platform::autostart::set_login_start(settings.startup.launch_at_login, &program)
             .map_err(error::from_platform)?;
     }
     Ok(())
@@ -852,6 +917,8 @@ pub(crate) mod test_support {
                 applied_endpoint: target.http.clone(),
                 applied_pac: target.pac.clone(),
                 applied_at_ms: 0,
+                target: None,
+                native: None,
             })
         }
 

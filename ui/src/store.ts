@@ -12,6 +12,7 @@ import { resolveLang, translate, type Lang } from "./lib/i18n";
 import { readStorage, writeStorage } from "./lib/storage";
 import type {
   AppSnapshot,
+  CoreKind,
   LatencyResult,
   Problem,
   RuleView,
@@ -79,7 +80,7 @@ interface State {
   toggleRule: (id: string, enabled: boolean) => Promise<void>;
   removeRule: (id: string) => Promise<void>;
   probeCores: () => Promise<void>;
-  installCore: (kind: string) => Promise<void>;
+  installCore: (kind: CoreKind) => Promise<boolean>;
   resetSettings: () => Promise<void>;
 
   setNodeQuery: (query: string) => void;
@@ -178,6 +179,7 @@ export const useStore = create<State>((set, get) => ({
     } catch (error) {
       const problem = toProblem(error) as Problem;
       await get().refresh();
+      if (problem.requiredCore) get().navigate("connection");
       get().toast("danger", translate(get().lang, "connection.failed"), problemTextSafe(get().lang, problem));
     } finally {
       set({ busy: null });
@@ -252,13 +254,13 @@ export const useStore = create<State>((set, get) => ({
 
   importNodes: async (text) => {
     try {
-      const { report } = await api.importText(text);
+      const { report, subscriptionIds } = await api.importText(text);
       await get().refresh();
       const summary = {
         added: report.added.length,
         duplicates: report.duplicates,
         failures: report.failures.length,
-        subscriptions: report.subscriptionUrls.length,
+        subscriptions: subscriptionIds.length,
       };
       get().toast(
         summary.failures > 0 ? "info" : "ok",
@@ -482,15 +484,24 @@ export const useStore = create<State>((set, get) => ({
   },
 
   installCore: async (kind) => {
+    if (get().busy) return false;
+    set({ busy: "install-core" });
     try {
-      const status = await api.installCore(kind as never);
+      const status = await api.installCore(kind);
       const snapshot = get().snapshot;
       if (snapshot) {
         set({ snapshot: { ...snapshot, cores: snapshot.cores.map((core) => (core.kind === status.kind ? status : core)) } });
       }
+      if (status.lastError) {
+        get().toast("danger", translate(get().lang, "settings.cores.install"), problemTextSafe(get().lang, status.lastError));
+      }
+      return status.installed && !status.lastError;
     } catch (error) {
       const problem = toProblem(error) as Problem;
       get().toast("danger", translate(get().lang, "settings.cores.install"), problemTextSafe(get().lang, problem));
+      return false;
+    } finally {
+      set({ busy: null });
     }
   },
 

@@ -60,6 +60,46 @@ impl LatencyProbe {
     }
 }
 
+/// Verify HTTP through the newly started inbound. The explicit proxy and
+/// disabled redirects prevent fallback to environment proxies or another URL.
+pub async fn verify_inbound(port: u16, url: &str) -> Result<(), EngineError> {
+    verify_route(Some(port), url).await
+}
+
+/// Probe after TUN takeover without any explicit HTTP/environment proxy.
+pub async fn verify_tun_route(url: &str) -> Result<(), EngineError> {
+    verify_route(None, url).await
+}
+
+async fn verify_route(port: Option<u16>, url: &str) -> Result<(), EngineError> {
+    let network_error = |_: reqwest::Error| {
+        EngineError::Network("经本地代理的连通性检查失败，请检查网络或更换节点".to_owned())
+    };
+    let mut client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5));
+    if let Some(port) = port {
+        let proxy =
+            reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(network_error)?;
+        client = client.proxy(proxy);
+    }
+    let client = client.build().map_err(network_error)?;
+    let status = client
+        .get(url)
+        .send()
+        .await
+        .map_err(network_error)?
+        .status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(EngineError::Network(format!(
+            "代理连通性检查未通过（HTTP {status}）"
+        )))
+    }
+}
+
 impl Default for LatencyProbe {
     fn default() -> Self {
         Self::new()

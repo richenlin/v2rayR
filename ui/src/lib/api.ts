@@ -31,12 +31,18 @@ import type {
   VersionInfo,
 } from "./types";
 
+export interface BackupPreview {
+  summary: { version: number; rules: number };
+  content: unknown;
+}
+
 export interface Backend {
   readonly kind: "tauri" | "mock";
   snapshot(): Promise<AppSnapshot>;
   version(): Promise<VersionInfo>;
   connect(profileId: string, mode: TakeoverMode, policy: RoutingPolicy): Promise<AppSnapshot>;
   disconnect(): Promise<AppSnapshot>;
+  lanCredentials(): Promise<{ username: string; password: string }>;
   switchNode(profileId: string): Promise<AppSnapshot>;
   setPolicy(policy: RoutingPolicy): Promise<AppSnapshot>;
   setMode(mode: TakeoverMode): Promise<AppSnapshot>;
@@ -46,6 +52,7 @@ export interface Backend {
   setTags(id: string, tags: string[]): Promise<void>;
   shareLink(id: string): Promise<string>;
   importText(text: string): Promise<{ report: ImportReport; subscriptionIds: string[] }>;
+  updatePac(): Promise<number>;
   testLatency(ids: string[]): Promise<LatencyResult[]>;
   addSubscription(url: string, name?: string): Promise<{ added: number; updated: number; removed: number }>;
   refreshSubscription(id: string): Promise<{ added: number; updated: number; removed: number; error?: unknown }>;
@@ -53,6 +60,14 @@ export interface Backend {
   setSubscriptionEnabled(id: string, enabled: boolean): Promise<void>;
   saveSettings(patches: SettingsPatch[]): Promise<SettingsView>;
   resetSettings(): Promise<SettingsView>;
+  exportBackup(): Promise<boolean>;
+  previewBackup(): Promise<BackupPreview | null>;
+  applyBackup(content: unknown): Promise<number>;
+  readWebDav(url: string, username?: string, password?: string): Promise<BackupPreview>;
+  createWebDav(url: string, username?: string, password?: string): Promise<void>;
+  updatesConfigured(): Promise<boolean>;
+  checkUpdate(): Promise<string | null>;
+  installUpdate(expectedVersion: string): Promise<void>;
   cores(): Promise<CoreStatus[]>;
   installCore(kind: CoreKind, url?: string, sha256?: string): Promise<CoreStatus>;
   rules(): Promise<RuleView[]>;
@@ -82,11 +97,20 @@ function toProblem(error: unknown): { code: string; key: string; detail?: string
 
 const tauriBackend: Backend = {
   kind: "tauri",
+  exportBackup: () => invoke("backup_export"),
+  previewBackup: () => invoke("backup_preview"),
+  applyBackup: (content) => invoke("backup_apply", { content }),
+  readWebDav: (url, username, password) => invoke("backup_webdav_read", { url, username, password }),
+  createWebDav: (url, username, password) => invoke("backup_webdav_create", { url, username, password }),
+  updatesConfigured: () => invoke("app_updates_configured"),
+  checkUpdate: () => invoke("app_check_update"),
+  installUpdate: (expectedVersion) => invoke("app_install_update", { expectedVersion }),
   snapshot: () => invoke<AppSnapshot>("app_snapshot"),
   version: () => invoke<VersionInfo>("app_version"),
   connect: (profileId, mode, policy) =>
     invoke<AppSnapshot>("session_connect", { request: { profileId, mode, policy } }),
   disconnect: () => invoke<AppSnapshot>("session_disconnect"),
+  lanCredentials: () => invoke("session_lan_credentials"),
   switchNode: (profileId) => invoke<AppSnapshot>("session_switch", { profileId }),
   setPolicy: (policy) => invoke<AppSnapshot>("session_set_policy", { policy }),
   setMode: (mode) => invoke<AppSnapshot>("session_set_mode", { mode }),
@@ -96,6 +120,7 @@ const tauriBackend: Backend = {
   setTags: (id, tags) => invoke<void>("node_set_tags", { id, tags }),
   shareLink: (id) => invoke<string>("node_share_link", { id }),
   importText: (text) => invoke("nodes_import_text", { text }),
+  updatePac: () => invoke("pac_update"),
   testLatency: (ids) => invoke<LatencyResult[]>("nodes_test_latency", { ids }),
   addSubscription: (url, name) => invoke("subscription_add", { url, name }),
   refreshSubscription: (id) => invoke("subscription_update", { id }),
@@ -283,7 +308,11 @@ const defaultSettings = (): SettingsView => ({
   },
   inbound: {
     mixedPort: 0,
+    dokodemoListenPort: 0,
+    dokodemoAddress: "",
+    dokodemoTargetPort: 0,
     allowLan: false,
+    lanBind: "",
     bypassLocal: true,
     bypassExtra: "",
     tunEnabled: false,
@@ -495,7 +524,9 @@ function snapshot(): AppSnapshot {
       dbSchema: 1,
       commit: "preview",
     },
-    connection: { ...state.connection },
+    connection: { ...state.connection, lan: state.connection.phase === "connected" && state.settings.inbound.allowLan
+      ? { address: state.settings.inbound.lanBind ?? "", socksPort: 10818, httpPort: 10818 }
+      : undefined },
     settings: structuredClone(state.settings),
     activeNode: active,
     nodes: structuredClone(state.nodes),
@@ -522,7 +553,16 @@ function requireNode(id: string): NodeView {
 }
 
 const mockBackend: Backend = {
+  updatePac: async () => 0,
   kind: "mock",
+  exportBackup: async () => false,
+  previewBackup: async () => null,
+  applyBackup: async () => 0,
+  readWebDav: async () => { throw new Error("WebDAV requires the desktop app"); },
+  createWebDav: async () => { throw new Error("WebDAV requires the desktop app"); },
+  updatesConfigured: async () => false,
+  checkUpdate: async () => null,
+  installUpdate: async () => { throw new Error("Updates require a signed desktop build"); },
   snapshot: async () => {
     await wait(30);
     return snapshot();
@@ -570,6 +610,10 @@ const mockBackend: Backend = {
     log("info", "session", `已连接 ${node.remark}（${node.core}）`);
     persist();
     return snapshot();
+  },
+  lanCredentials: async () => {
+    if (!snapshot().connection.lan) throw new Error("No active LAN proxy");
+    return { username: "v2rayr", password: "preview-only" };
   },
   disconnect: async () => {
     state.connection = { ...state.connection, phase: "disconnecting" };
@@ -664,6 +708,7 @@ const mockBackend: Backend = {
     const failures: ImportReport["failures"] = [];
     const added: NodeView[] = [];
     const subscriptionUrls: string[] = [];
+    const subscriptionIds: string[] = [];
     const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     let duplicates = 0;
     for (const line of lines) {
@@ -679,8 +724,9 @@ const mockBackend: Backend = {
         });
         continue;
       }
-      const protocol = match[1].toLowerCase();
-      if (!["vless", "vmess", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "anytls", "naive"].includes(protocol)) {
+      const scheme = match[1].toLowerCase();
+      const protocol = scheme === "http-proxy" || scheme === "https-proxy" ? "http" : scheme === "socks5" ? "socks" : scheme;
+      if (!["vless", "vmess", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "anytls", "naive", "http", "socks"].includes(protocol)) {
         failures.push({
           source: `${protocol}://…`,
           error: { code: "unsupported_scheme", key: "error.unsupported_scheme", detail: protocol, retryable: false },
@@ -691,7 +737,7 @@ const mockBackend: Backend = {
       const port = Number(match[3]);
       const fragment = line.split("#")[1] ?? "";
       const remark = decodeURIComponent(fragment) || `${protocol} ${address}`;
-      if (state.nodes.some((node) => node.address === address && node.port === port)) {
+      if (state.nodes.some((node) => node.address === address && node.port === port && node.protocol === (protocol === "hy2" ? "hysteria2" : protocol))) {
         duplicates += 1;
         continue;
       }
@@ -702,7 +748,7 @@ const mockBackend: Backend = {
         transport: "tcp",
         address,
         port,
-        tls: protocol !== "ss" && protocol !== "shadowsocks",
+        tls: protocol === "http" ? scheme === "https-proxy" : !["ss", "shadowsocks", "socks"].includes(protocol),
         tags: [],
         favorite: false,
         core: protocol === "vless" ? "xray" : "sing-box",
@@ -711,7 +757,10 @@ const mockBackend: Backend = {
       added.push(node);
     }
     for (const url of subscriptionUrls) {
-      if (!state.subscriptions.some((subscription) => subscription.url === url)) {
+      const existing = state.subscriptions.find((subscription) => subscription.url === url);
+      if (existing) {
+        subscriptionIds.push(existing.id);
+      } else {
         const host = (() => {
           try {
             return new URL(url).host;
@@ -719,8 +768,10 @@ const mockBackend: Backend = {
             return url;
           }
         })();
+        const id = uuid();
+        subscriptionIds.push(id);
         state.subscriptions.unshift({
-          id: uuid(),
+          id,
           name: host,
           url,
           urlHost: host,
@@ -734,7 +785,7 @@ const mockBackend: Backend = {
     }
     log("info", "import", `导入完成：新增 ${added.length}，重复 ${duplicates}，失败 ${failures.length}`);
     persist();
-    return { report: { added, duplicates, failures, subscriptionUrls }, subscriptionIds: [] };
+    return { report: { added, duplicates, failures, subscriptionUrls }, subscriptionIds };
   },
   testLatency: async (ids) => {
     const targets = ids.length ? state.nodes.filter((node) => ids.includes(node.id)) : state.nodes;
@@ -840,6 +891,14 @@ const mockBackend: Backend = {
     for (const patch of patches) {
       // Mirror `Settings::validate` in crates/app: the preview must fail the
       // same input the real backend rejects, or it teaches the wrong thing.
+      if (patch.group === "inbound" && patch.values.allowLan) {
+        const parts = String(patch.values.lanBind ?? "").trim().split(".");
+        const ip = parts.map(Number);
+        if (parts.length !== 4 || parts.some((part, i) => !/^\d{1,3}$/.test(part) || String(ip[i]) !== part || ip[i] > 255)
+          || !(ip[0] === 10 || ip[0] === 192 && ip[1] === 168 || ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31)) {
+          throw { code: "invalid_value", key: "error.invalid_value", detail: "LAN requires a private IPv4 address.", retryable: false };
+        }
+      }
       validateSettingsPatch(patch);
     }
     for (const patch of patches) {

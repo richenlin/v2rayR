@@ -45,6 +45,14 @@ pub enum RoutingPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LanEndpoint {
+    pub address: std::net::Ipv4Addr,
+    pub socks_port: u16,
+    pub http_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionState {
     pub phase: ConnectionPhase,
     pub mode: TakeoverMode,
@@ -63,10 +71,14 @@ pub struct ConnectionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pac_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     /// Set when the system proxy / TUN was applied. A failed takeover with a
     /// healthy kernel is still *not* "connected" for the user.
     pub takeover_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan: Option<LanEndpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takeover_error: Option<Problem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,8 +96,10 @@ impl Default for ConnectionState {
             core: None,
             inbound_port: None,
             api_port: None,
+            pac_url: None,
             started_at: None,
             takeover_applied: false,
+            lan: None,
             takeover_error: None,
             error: None,
         }
@@ -97,7 +111,10 @@ impl ConnectionState {
     /// failures downgrade a technically running session to `Failed`, because
     /// "已连接" while nothing is routed would be a lie.
     pub fn headline(&self) -> ConnectionPhase {
-        if self.phase == ConnectionPhase::Connected && !self.takeover_applied {
+        if self.phase == ConnectionPhase::Connected
+            && self.mode != TakeoverMode::Manual
+            && !self.takeover_applied
+        {
             return ConnectionPhase::Failed;
         }
         self.phase
@@ -141,6 +158,8 @@ impl From<TrafficTick> for TrafficView {
 pub struct AppSnapshot {
     pub version: VersionInfo,
     pub connection: ConnectionState,
+    #[serde(default)]
+    pub tun_available: bool,
     pub settings: SettingsView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_node: Option<NodeView>,

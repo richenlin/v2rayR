@@ -25,22 +25,25 @@ pub struct Token(String);
 impl Token {
     /// Create a new token, replacing any existing file with mode 0600.
     pub fn create(path: &Path) -> Result<Self, TokenError> {
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(parent)?;
         }
-        let token = format!("{}{}", uuid_like(), uuid_like());
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
+        let token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
         file.write_all(token.as_bytes())?;
-        file.sync_all()?;
+        file.as_file().sync_all()?;
+        file.persist(path).map_err(|failure| failure.error)?;
         Ok(Self(token))
     }
 
@@ -89,17 +92,6 @@ impl std::fmt::Debug for Token {
 /// The default location inside the app runtime directory.
 pub fn default_token_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("helper.token")
-}
-
-fn uuid_like() -> String {
-    // No dependency on `uuid` here on purpose: the helper stays tiny.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let pid = std::process::id();
-    format!("{nanos:032x}{pid:08x}")
 }
 
 #[cfg(test)]

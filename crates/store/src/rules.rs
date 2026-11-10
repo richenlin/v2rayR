@@ -135,6 +135,37 @@ impl Database {
             .collect())
     }
 
+    /// Import portable rules without replacing any existing rule, retaining
+    /// order within the imported set and the local enabled value on duplicates.
+    pub fn merge_backup_rules(
+        &self,
+        rules: &[(RuleKind, String, RuleAction, bool)],
+        before_commit: impl FnOnce() -> Result<(), StoreError>,
+    ) -> Result<usize, StoreError> {
+        let transaction = self.conn().unchecked_transaction()?;
+        let mut position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM rules",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut added = 0;
+        for (kind, value, action, enabled) in rules {
+            let inserted = transaction.execute(
+                "INSERT INTO rules (id, kind, value, action, enabled, position, created_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                 WHERE NOT EXISTS (SELECT 1 FROM rules WHERE kind = ?2 AND value = ?3 AND action = ?4)",
+                params![Uuid::new_v4().to_string(), kind.as_str(), value, action.as_str(), *enabled, position, ts_to_str(Utc::now())],
+            )?;
+            if inserted != 0 {
+                position += 1;
+                added += 1;
+            }
+        }
+        before_commit()?;
+        transaction.commit()?;
+        Ok(added)
+    }
+
     pub fn add_rule(
         &self,
         kind: RuleKind,

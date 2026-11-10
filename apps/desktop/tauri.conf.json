@@ -35,9 +35,12 @@
       "icons/128x128.png",
       "icons/icon.icns"
     ],
-    "resources": [
-      "../../resources/rules/*"
-    ],
+    "externalBin": ["embedded-cores/v2rayr-core-sing-box", "embedded-cores/v2rayr-core-xray"],
+    "resources": {
+      "../../resources/rules/*": "_up_/_up_/resources/rules/",
+      "embedded-cores/xray-assets/": "xray-assets/",
+      "embedded-cores/licenses/": "core-licenses/"
+    },
     "category": "Utility",
     "shortDescription": "Proxy client for sing-box and Xray",
     "longDescription": "v2rayR is a desktop proxy client: manage nodes and subscriptions, test latency, and run sing-box, Xray or mihomo with a typed configuration builder."

@@ -1,8 +1,10 @@
 //! `v2rayr-helper`: the only binary that may touch privileged system state.
 //!
-//! Every invocation is authenticated with a per-install token (mode 0600) and
-//! prints exactly one JSON `HelperResponse` on stdout, so the caller never has to
-//! parse human text. Exit codes: 0 success, 64 usage, 77 unauthorized, 70 failure.
+//! Linux TUN has a separate administrator-authorized pipe lease. Legacy
+//! unprivileged operations retain their JSON request/response format.
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+mod tun;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -62,6 +64,11 @@ enum Command {
     Status,
     /// Read newline-delimited JSON requests from stdin and answer each one.
     Serve,
+    /// Private one-session protocol, enabled only under administrator policy.
+    TunStdio,
+    /// Private Windows UAC entry point; only accepts a local lease identifier.
+    #[cfg(windows)]
+    TunPipe { nonce: String, caller: u32 },
 }
 
 #[derive(Subcommand, Debug)]
@@ -75,6 +82,25 @@ enum AutostartAction {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::TunStdio) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return tun::serve();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        bail!("TUN helper is not available on this platform");
+    }
+    #[cfg(windows)]
+    if let Command::TunPipe { ref nonce, caller } = cli.command {
+        return tun::serve_windows(nonce, caller);
+    }
+    #[cfg(windows)]
+    if v2rayr_platform::tun::windows::is_admin() {
+        bail!("only tun-pipe may run with elevated privileges");
+    }
+    // Legacy commands accept caller paths and are never privileged.
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        bail!("only tun-stdio may run with elevated privileges");
+    }
     let token = load_token(&cli)?;
     let proxy = MacOsSystemProxy::system();
     let autostart = LaunchAgentAutostart::system()?;
@@ -138,7 +164,9 @@ fn into_request(command: Command) -> anyhow::Result<HelperRequest> {
             AutostartAction::Disable => HelperRequest::AutostartDisable,
         },
         Command::Status => HelperRequest::Status,
-        Command::Serve => bail!("serve is handled separately"),
+        Command::Serve | Command::TunStdio => bail!("serve is handled separately"),
+        #[cfg(windows)]
+        Command::TunPipe { .. } => bail!("serve is handled separately"),
     })
 }
 

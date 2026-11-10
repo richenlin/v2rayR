@@ -123,6 +123,9 @@ impl KernelProcess {
                 // The socket may accept before the API can answer; give the
                 // kernel a beat so the first /traffic call does not race it.
                 tokio::time::sleep(Duration::from_millis(80)).await;
+                if let Some(error) = self.exit_error() {
+                    return Err(error);
+                }
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -207,6 +210,17 @@ impl KernelProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
+    }
+}
+
+impl Drop for KernelProcess {
+    fn drop(&mut self) {
+        // Covers launch/probe cancellation and error paths before the child
+        // becomes part of SessionRuntime. Normal shutdown has already reaped it.
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 

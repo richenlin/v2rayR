@@ -15,14 +15,14 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
-use v2rayr_app::text;
 use v2rayr_app::{App, AppOptions, ConnectionRequest, ImportRequest, Settings};
+use v2rayr_app::{backup::PortableBackup, text};
 use v2rayr_domain::CoreKind;
 use v2rayr_ipc::{
     ConnectionPhase, LatencyMethod, Problem, RoutingPolicy, SettingsGroupId, SettingsPatch,
     TakeoverMode,
 };
-use v2rayr_platform::AppPaths;
+use v2rayr_platform::{AppPaths, InstanceOutcome, acquire_single_instance};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -94,8 +94,44 @@ enum Command {
         #[arg(default_value_t = 50)]
         limit: usize,
     },
+    /// Refresh the domain rules used by PAC mode.
+    PacUpdate,
+    /// Export or restore portable preferences and routing rules.
+    Backup {
+        #[command(subcommand)]
+        action: BackupCommand,
+    },
     /// Print the resolved data directory.
     Paths,
+}
+
+#[derive(Subcommand, Debug)]
+enum BackupCommand {
+    Export {
+        file: PathBuf,
+    },
+    Import {
+        file: PathBuf,
+        /// Apply the preview; otherwise only print the affected groups.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Download a portable file. Never overwrites a local file.
+    Pull {
+        url: String,
+        file: PathBuf,
+        #[arg(long)]
+        username: Option<String>,
+    },
+    /// Upload a file. Creates only unless a strong ETag is given.
+    Push {
+        file: PathBuf,
+        url: String,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        if_match: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,6 +158,12 @@ async fn main() -> anyhow::Result<()> {
     let paths = match &cli.home {
         Some(root) => AppPaths::new(root.clone()),
         None => AppPaths::discover().context("resolving the data directory")?,
+    };
+    let _instance = match acquire_single_instance(&paths.runtime_dir().join("v2rayr.lock"))? {
+        InstanceOutcome::Primary(guard) => guard,
+        InstanceOutcome::AlreadyRunning(_) => {
+            bail!("该数据目录正在使用；请退出桌面应用或使用 --home 指定隔离目录")
+        }
     };
     let app = App::open(paths.clone(), AppOptions::new(env!("CARGO_PKG_VERSION")))
         .map_err(problem_to_anyhow)?;
@@ -165,6 +207,11 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::PacUpdate => {
+            let count = app.update_pac_rules().await.map_err(problem_to_anyhow)?;
+            println!("已更新 {count} 条 PAC 域名规则");
+            Ok(())
+        }
         Command::Logs { limit } => {
             for entry in app.tail_logs(limit) {
                 println!(
@@ -179,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Backup { action } => backup(&app, action).await,
         Command::Paths => {
             println!("{}", paths.root.display());
             println!("数据库     {}", paths.database().display());
@@ -380,7 +428,12 @@ async fn connect(
                 println!("{}", serde_json::to_string_pretty(&snapshot)?);
             } else {
                 println!(
-                    "已连接：{}（端口 {}，验证后自动断开）",
+                    "{}：{}（端口 {}，验证后自动断开）",
+                    if snapshot.connection.takeover_applied {
+                        "已连接"
+                    } else {
+                        "仅本地可用"
+                    },
                     snapshot.connection.profile_remark.unwrap_or_default(),
                     snapshot.connection.inbound_port.unwrap_or_default()
                 );
@@ -449,7 +502,14 @@ async fn run(app: &App, node: &str, mode: &str, policy: &str) -> anyhow::Result<
         policy: parse_policy(policy)?,
     };
     app.connect(request).await.map_err(problem_to_anyhow)?;
-    println!("已连接，按 Ctrl-C 停止。");
+    println!(
+        "{}，按 Ctrl-C 停止。",
+        if app.snapshot()?.connection.takeover_applied {
+            "已连接"
+        } else {
+            "仅本地可用"
+        }
+    );
     loop {
         if INTERRUPTED.load(Ordering::Relaxed) {
             break;
@@ -462,6 +522,9 @@ async fn run(app: &App, node: &str, mode: &str, policy: &str) -> anyhow::Result<
                 text::size(traffic.total_down_bytes),
                 text::size(traffic.total_up_bytes)
             );
+        }
+        if let Some(problem) = app.snapshot()?.connection.error {
+            return Err(problem_to_anyhow(problem));
         }
         sleep(Duration::from_secs(1)).await;
     }
@@ -556,6 +619,67 @@ fn problem_to_anyhow(problem: Problem) -> anyhow::Error {
 
 /// SIGINT/SIGTERM set a flag instead of killing the process, so the session can
 /// restore the system proxy before exiting.
+async fn backup(app: &App, action: BackupCommand) -> anyhow::Result<()> {
+    let password = |username: &Option<String>| -> anyhow::Result<Option<String>> {
+        username
+            .as_ref()
+            .map(|_| {
+                std::env::var("V2RAYR_WEBDAV_PASSWORD")
+                    .context("指定用户名时请通过 V2RAYR_WEBDAV_PASSWORD 提供密码")
+            })
+            .transpose()
+    };
+    match action {
+        BackupCommand::Export { file } => {
+            let backup = app.export_portable_backup()?;
+            backup.write_new(&file)?;
+            println!("{}", backup.summary());
+        }
+        BackupCommand::Import { file, apply } => {
+            let backup = PortableBackup::read(&file)?;
+            println!("{}", backup.summary());
+            if apply {
+                let added = app.import_portable_backup(backup).await?;
+                println!("已恢复便携偏好并合并 {added} 条新规则");
+            } else {
+                println!("仅预览；加 --apply 后才写入。");
+            }
+        }
+        BackupCommand::Pull {
+            url,
+            file,
+            username,
+        } => {
+            let password = password(&username)?;
+            let (backup, etag) =
+                PortableBackup::webdav_get(&url, username.as_deref().zip(password.as_deref()))
+                    .await?;
+            backup.write_new(&file)?;
+            println!(
+                "{}",
+                serde_json::json!({ "backup": backup.summary(), "etag": etag })
+            );
+        }
+        BackupCommand::Push {
+            file,
+            url,
+            username,
+            if_match,
+        } => {
+            let password = password(&username)?;
+            PortableBackup::read(&file)?
+                .webdav_put(
+                    &url,
+                    username.as_deref().zip(password.as_deref()),
+                    if_match.as_deref(),
+                )
+                .await?;
+            println!("已上传便携备份");
+        }
+    }
+    Ok(())
+}
+
 fn install_interrupt_handler() {
     extern "C" fn handler(_signal: libc::c_int) {
         INTERRUPTED.store(true, Ordering::SeqCst);

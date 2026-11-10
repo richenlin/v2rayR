@@ -140,6 +140,8 @@ mod tests {
                 applied_endpoint: target.http.clone(),
                 applied_pac: target.pac.clone(),
                 applied_at_ms: 1,
+                target: None,
+                native: None,
             })
         }
 
@@ -228,6 +230,8 @@ mod tests {
             applied_endpoint: Some(ProxyEndpoint::new("127.0.0.1", 10808)),
             applied_pac: None,
             applied_at_ms: 0,
+            target: None,
+            native: None,
         })
         .expect("snapshot");
         let response = execute(

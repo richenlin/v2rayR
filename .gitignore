@@ -10,6 +10,8 @@ ui/.vite
 
 # Tauri (built through `cargo tauri`, not by CI for plain `cargo test`)
 apps/desktop/gen
+apps/desktop/embedded-cores
+apps/desktop/.embedded-cores.*
 
 # Local runtime data
 *.log

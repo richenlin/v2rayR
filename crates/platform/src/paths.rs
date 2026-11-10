@@ -23,6 +23,7 @@ impl AppPaths {
         if let Ok(root) = std::env::var("V2RAYR_HOME") {
             return Ok(Self::new(root));
         }
+        #[cfg(unix)]
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or(PlatformError::InvalidState("HOME is not set".to_owned()))?;
@@ -36,7 +37,13 @@ impl AppPaths {
         #[cfg(windows)]
         let root = std::env::var_os("APPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|home| PathBuf::from(home).join("AppData/Roaming"))
+            })
+            .ok_or_else(|| {
+                PlatformError::InvalidState("APPDATA and USERPROFILE are not set".into())
+            })?
             .join("v2rayR");
         Ok(Self::new(root))
     }

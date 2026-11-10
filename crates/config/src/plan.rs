@@ -71,17 +71,32 @@ pub enum RuleSetKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundPlan {
-    /// `127.0.0.1` unless LAN access is on.
     pub listen: String,
     pub port: u16,
-    /// Local HTTP port used by kernels that cannot serve mixed protocol.
     pub http_port: Option<u16>,
-    pub allow_lan: bool,
-    /// Optional credentials for the LAN case; `None` keeps the loopback-only
-    /// no-auth default.
-    pub username: Option<String>,
-    pub password: Option<String>,
+    pub dokodemo: Option<(u16, String, u16)>,
+    pub lan: Option<LanInboundPlan>,
 }
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct LanInboundPlan {
+    pub address: std::net::Ipv4Addr,
+    pub socks_port: u16,
+    pub http_port: u16,
+    pub password: String,
+}
+
+impl std::fmt::Debug for LanInboundPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LanInboundPlan")
+            .field("address", &self.address)
+            .field("socks_port", &self.socks_port)
+            .field("http_port", &self.http_port)
+            .finish_non_exhaustive()
+    }
+}
+
+pub const LAN_USERNAME: &str = "v2rayr";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiPlan {
@@ -153,10 +168,29 @@ impl SessionPlan {
                 ));
             }
         }
-        if self.inbound.allow_lan && self.inbound.listen.starts_with("127.") {
+        if self.inbound.listen != "127.0.0.1" {
             return Err(super::ConfigError::InvalidPlan(
-                "LAN access is enabled but the listen address is loopback".into(),
+                "the unauthenticated listener must use IPv4 loopback".into(),
             ));
+        }
+        if let Some(lan) = &self.inbound.lan {
+            let reserved = [
+                Some(self.inbound.port),
+                self.inbound.http_port,
+                Some(self.api.port),
+            ];
+            if !lan.address.is_private()
+                || lan.password.len() < 24
+                || [lan.socks_port, lan.http_port]
+                    .iter()
+                    .any(|port| *port < 1024 || reserved.contains(&Some(*port)))
+                || (self.inbound.http_port.is_some() && lan.socks_port == lan.http_port)
+                || (self.inbound.http_port.is_none() && lan.socks_port != lan.http_port)
+            {
+                return Err(super::ConfigError::InvalidPlan(
+                    "invalid authenticated LAN listener".into(),
+                ));
+            }
         }
         if self.tun.is_some() && self.inbound.http_port.is_some() {
             // Not fatal, but TUN only needs the mixed inbound; keep the plan honest.

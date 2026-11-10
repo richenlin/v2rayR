@@ -24,9 +24,20 @@ pub async fn check_config(
     config: &Path,
     data_dir: &Path,
 ) -> Result<CheckOutcome, EngineError> {
+    check_config_with_assets(kind, program, config, data_dir, None).await
+}
+
+pub async fn check_config_with_assets(
+    kind: CoreKind,
+    program: &Path,
+    config: &Path,
+    data_dir: &Path,
+    xray_assets: Option<&Path>,
+) -> Result<CheckOutcome, EngineError> {
     let program: PathBuf = program.to_path_buf();
     let config: PathBuf = config.to_path_buf();
     let data_dir: PathBuf = data_dir.to_path_buf();
+    let xray_assets = xray_assets.map(Path::to_path_buf);
     let task = tokio::task::spawn_blocking(move || {
         let mut command = Command::new(&program);
         match kind {
@@ -36,6 +47,9 @@ pub async fn check_config(
             }
             CoreKind::Xray => {
                 command.arg("-test").arg("-c").arg(&config);
+                if let Some(assets) = xray_assets {
+                    command.env("XRAY_LOCATION_ASSET", assets);
+                }
             }
             CoreKind::Mihomo => {
                 command.arg("-t");

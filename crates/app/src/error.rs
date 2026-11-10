@@ -51,8 +51,8 @@ pub fn from_engine(error: EngineError) -> Problem {
         ErrorCode::NetworkError | ErrorCode::CoreFailed | ErrorCode::Storage
     );
     let code = error.code();
-    let detail = if code == ErrorCode::CoreMissing {
-        "未找到可用的代理内核；请安装 sing-box 或 Xray，并在设置中指定内核路径".to_owned()
+    let detail = if let EngineError::MissingCore { core } = &error {
+        format!("未找到所需的 {core} 内核，请先安装后重试。")
     } else {
         error.to_string()
     };

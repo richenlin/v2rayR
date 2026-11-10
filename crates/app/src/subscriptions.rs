@@ -48,6 +48,11 @@ impl App {
     /// Refresh one subscription. Returns a report even when it failed — the
     /// caller (and the UI) wants per-subscription status, not one broad error.
     pub async fn refresh_subscription(&self, id: Uuid) -> RefreshReport {
+        let _guard = self.subscription_refresh_lock.lock().await;
+        self.refresh_subscription_locked(id).await
+    }
+
+    async fn refresh_subscription_locked(&self, id: Uuid) -> RefreshReport {
         let settings = self.settings();
         let subscription = match self.db().subscription(id) {
             Ok(Some(subscription)) => subscription,
@@ -117,7 +122,10 @@ impl App {
                 profile
             })
             .collect();
-        let plan = plan_merge(&existing, &incoming, DEFAULT_SALT);
+        let mut plan = plan_merge(&existing, &incoming, DEFAULT_SALT);
+        if let Some(active) = self.active_request() {
+            plan.removed.retain(|id| *id != active.profile_id);
+        }
 
         let keep_removed = settings.subscription.keep_removed_nodes;
         let mut failures = Vec::new();
@@ -213,7 +221,17 @@ impl App {
         };
         let mut reports = Vec::with_capacity(due.len());
         for subscription in due {
-            reports.push(self.refresh_subscription(subscription.id).await);
+            let _guard = self.subscription_refresh_lock.lock().await;
+            // A manual refresh may have completed while the timer was waiting.
+            if self
+                .db()
+                .subscription(subscription.id)
+                .ok()
+                .flatten()
+                .is_some_and(|item| item.is_due(Utc::now()))
+            {
+                reports.push(self.refresh_subscription_locked(subscription.id).await);
+            }
         }
         reports
     }

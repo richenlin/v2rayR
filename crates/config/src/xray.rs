@@ -37,9 +37,16 @@ pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
     root.insert("outbounds".into(), outbounds(plan));
     root.insert("routing".into(), routing(plan));
     root.insert("dns".into(), dns(plan));
+    root.insert("stats".into(), json!({}));
+    root.insert(
+        "api".into(),
+        json!({"tag": "v2rayr-stats", "listen": format!("127.0.0.1:{}", plan.api.port),
+            "services": ["StatsService"]}),
+    );
     root.insert(
         "policy".into(),
-        json!({"levels": {"0": {"handshake": 4, "connIdle": 300}}}),
+        json!({"levels": {"0": {"handshake": 4, "connIdle": 300}},
+            "system": {"statsInboundUplink": true, "statsInboundDownlink": true}}),
     );
 
     let body = serde_json::to_string_pretty(&Value::Object(root))?;
@@ -76,18 +83,7 @@ fn inbounds(plan: &SessionPlan) -> Value {
     socks.insert("port".into(), json!(plan.inbound.port));
     socks.insert("protocol".into(), json!("socks"));
     let mut settings = Map::new();
-    if let (Some(username), Some(password)) = (
-        plan.inbound.username.as_ref(),
-        plan.inbound.password.as_ref(),
-    ) {
-        settings.insert("auth".into(), json!("password"));
-        settings.insert(
-            "accounts".into(),
-            json!([{"user": username, "pass": password}]),
-        );
-    } else {
-        settings.insert("auth".into(), json!("noauth"));
-    }
+    settings.insert("auth".into(), json!("noauth"));
     settings.insert("udp".into(), json!(true));
     socks.insert("settings".into(), Value::Object(settings));
     socks.insert("sniffing".into(), sniffing(plan.sniffing));
@@ -101,7 +97,26 @@ fn inbounds(plan: &SessionPlan) -> Value {
     http.insert("settings".into(), json!({"allowTransparent": false}));
     http.insert("sniffing".into(), sniffing(plan.sniffing));
 
-    json!([Value::Object(socks), Value::Object(http)])
+    let mut inbounds = vec![Value::Object(socks), Value::Object(http)];
+    if let Some((listen, address, port)) = &plan.inbound.dokodemo {
+        inbounds.push(json!({
+            "tag": "dokodemo-in", "listen": "127.0.0.1", "port": listen,
+            "protocol": "dokodemo-door",
+            "settings": {"address": address, "port": port, "network": "tcp,udp", "followRedirect": false}
+        }));
+    }
+    if let Some(lan) = &plan.inbound.lan {
+        let accounts = json!([{"user":crate::LAN_USERNAME,"pass":lan.password}]);
+        inbounds.push(
+            json!({"tag":"lan-socks","listen":lan.address,"port":lan.socks_port,
+            "protocol":"socks","settings":{"auth":"password","accounts":accounts,"udp":false}}),
+        );
+        inbounds.push(
+            json!({"tag":"lan-http","listen":lan.address,"port":lan.http_port,
+            "protocol":"http","settings":{"allowTransparent":false,"accounts":accounts}}),
+        );
+    }
+    Value::Array(inbounds)
 }
 
 fn outbounds(plan: &SessionPlan) -> Value {
@@ -382,7 +397,7 @@ fn routing(plan: &SessionPlan) -> Value {
     if plan.policy != RoutingMode::Direct {
         rules.push(json!({
             "type": "field",
-            "ip": ["geoip:private"],
+            "ip": ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
             "outboundTag": "direct",
         }));
     }
@@ -490,9 +505,8 @@ mod tests {
                 listen: "127.0.0.1".into(),
                 port: 10808,
                 http_port: Some(10809),
-                allow_lan: false,
-                username: None,
-                password: None,
+                dokodemo: None,
+                lan: None,
             },
             api: ApiPlan {
                 port: 10812,

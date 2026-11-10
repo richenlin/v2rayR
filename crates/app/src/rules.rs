@@ -71,7 +71,7 @@ impl App {
     }
 }
 
-fn normalize_rule_value(value: &str) -> Result<String, Problem> {
+pub(crate) fn normalize_rule_value(value: &str) -> Result<String, Problem> {
     let value = value.trim();
     if value.is_empty() {
         return Err(Problem::new(ErrorCode::InvalidValue.as_str(), false)

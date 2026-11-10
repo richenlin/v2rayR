@@ -24,7 +24,8 @@ pub use settings::{
     SettingsGroupId, SettingsPatch, SettingsView, StartupSettings, SubscriptionSettings,
 };
 pub use snapshot::{
-    AppSnapshot, ConnectionPhase, ConnectionState, RoutingPolicy, TakeoverMode, TrafficView,
+    AppSnapshot, ConnectionPhase, ConnectionState, LanEndpoint, RoutingPolicy, TakeoverMode,
+    TrafficView,
 };
 pub use views::{
     CoreStatus, ImportFailure, ImportReport, LatencyMethod, LatencyResult, LatencyView, NodeView,

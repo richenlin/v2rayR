@@ -19,8 +19,8 @@ use v2rayr_domain::{CoreKind, ErrorCode};
 
 pub use capability::{Capability, capabilities, choose_core};
 pub use plan::{
-    ApiPlan, CustomRule, DnsPlan, InboundPlan, RoutingMode, RuleAction, RuleKind, RuleSetKind,
-    RuleSetRef, SessionPlan, TunPlan,
+    ApiPlan, CustomRule, DnsPlan, InboundPlan, LAN_USERNAME, LanInboundPlan, RoutingMode,
+    RuleAction, RuleKind, RuleSetKind, RuleSetRef, SessionPlan, TunPlan,
 };
 pub use validate::validate;
 

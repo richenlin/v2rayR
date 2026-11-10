@@ -308,6 +308,7 @@ function ImportModal({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState("");
   const [result, setResult] = useState<{ added: number; duplicates: number; failures: number; subscriptions: number } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [httpProxy, setHttpProxy] = useState(false);
 
   return (
     <Modal
@@ -325,10 +326,19 @@ function ImportModal({ onClose }: { onClose: () => void }) {
             disabled={busy || text.trim().length === 0}
             onClick={async () => {
               setBusy(true);
-              const summary = await importNodes(text);
-              setResult(summary);
-              setBusy(false);
-              if (summary.added > 0) setText("");
+              try {
+                const input = httpProxy
+                  ? text.split(/\r?\n/).map((line) => line.trim().replace(/^(https?):\/\//i, "$1-proxy://")).join("\n")
+                  : text;
+                const summary = await importNodes(input);
+                if (summary.failures === 0 && (summary.added + summary.duplicates + summary.subscriptions > 0)) {
+                  onClose();
+                } else {
+                  setResult(summary);
+                }
+              } finally {
+                setBusy(false);
+              }
             }}
           >
             {busy ? <Icon name="refresh" size={14} className="spin" /> : null}
@@ -337,6 +347,10 @@ function ImportModal({ onClose }: { onClose: () => void }) {
         </>
       }
     >
+      <label className="field-label" style={{ display: "block", marginBottom: 12 }}>
+        <input type="checkbox" checked={httpProxy} onChange={(event) => setHttpProxy(event.target.checked)} />
+        {" "}{t("nodes.import.httpProxy")}
+      </label>
       <textarea
         className="control control-mono"
         style={{ minHeight: 190 }}

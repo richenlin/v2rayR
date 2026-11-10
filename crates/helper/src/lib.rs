@@ -6,12 +6,9 @@
 //! authorization check and the system operations; `src/main.rs` is the CLI that
 //! the app (or a launchd job) executes.
 //!
-//! Threat model, stated plainly: the helper runs as root only for the two
-//! operations that need it (TUN device setup, writing system-wide proxy state).
-//! Requests carry a token stored in the app's runtime directory with mode 0600
-//! and compared in constant time. That stops other local users; it does not stop
-//! an attacker who already controls the invoking user account — at that point the
-//! attacker can edit the proxy settings through `networksetup` anyway.
+//! Linux TUN is a separate stdin lease authorized by the administrator's
+//! exact sudo policy; it never accepts a caller token file or config path.
+//! Legacy token commands are unprivileged on Unix.
 
 pub mod authorize;
 pub mod ops;

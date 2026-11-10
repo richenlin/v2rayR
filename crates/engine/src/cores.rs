@@ -1,9 +1,7 @@
 //! Locating kernel binaries and asking them what they are.
 //!
-//! Lookup order: an explicit path from settings, the app's own `cores` folder
-//! (what the desktop bundle ships), then `PATH`. A missing binary is a normal,
-//! reportable state — the connection page shows "未安装内核" and offers to open
-//! the install guide rather than pretending to connect.
+//! For desktop builds, signed sidecars next to the executable take priority.
+//! Other callers look in the data directory and then PATH.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,10 +28,14 @@ pub struct CoreBinaries {
 
 impl CoreBinaries {
     pub fn discover(paths: &AppPaths) -> Self {
+        Self::discover_with_bundle(paths, None)
+    }
+
+    pub fn discover_with_bundle(paths: &AppPaths, bundled: Option<&Path>) -> Self {
         let bin = paths.core_bin_dir();
         Self {
-            sing_box: locate(&bin, "sing-box"),
-            xray: locate(&bin, "xray"),
+            sing_box: bundled_core(bundled, "sing-box").or_else(|| locate(&bin, "sing-box")),
+            xray: bundled_core(bundled, "xray").or_else(|| locate(&bin, "xray")),
             mihomo: locate(&bin, "mihomo"),
         }
     }
@@ -79,12 +81,26 @@ impl CoreBinaries {
     }
 }
 
+fn bundled_core(dir: Option<&Path>, name: &str) -> Option<PathBuf> {
+    let path = dir?.join(binary_name(&format!("v2rayr-core-{name}")));
+    is_executable(&path).then_some(path)
+}
+
 fn locate(preferred_dir: &Path, name: &str) -> Option<PathBuf> {
-    let candidate = preferred_dir.join(name);
+    let name = binary_name(name);
+    let candidate = preferred_dir.join(&name);
     if is_executable(&candidate) {
         return Some(candidate);
     }
-    which(name)
+    which(&name)
+}
+
+pub(crate) fn binary_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    }
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -192,6 +208,29 @@ pub async fn version_line(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_bundle_wins_over_existing_user_cores() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(temp.path().join("user"));
+        let bundled = temp.path().join("bundle");
+        std::fs::create_dir_all(paths.core_bin_dir()).unwrap();
+        std::fs::create_dir_all(&bundled).unwrap();
+        for (kind, name) in [(CoreKind::SingBox, "sing-box"), (CoreKind::Xray, "xray")] {
+            let user = paths.core_bin_dir().join(binary_name(name));
+            let shipped = bundled.join(binary_name(&format!("v2rayr-core-{name}")));
+            std::fs::write(&user, b"user").unwrap();
+            std::fs::write(&shipped, b"bundle").unwrap();
+            assert_eq!(
+                CoreBinaries::discover_with_bundle(&paths, Some(&bundled)).path(kind),
+                Some(shipped.as_path())
+            );
+            assert_eq!(
+                CoreBinaries::discover(&paths).path(kind),
+                Some(user.as_path())
+            );
+        }
+    }
 
     #[test]
     fn version_is_extracted_from_common_banners() {

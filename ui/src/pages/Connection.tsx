@@ -1,3 +1,4 @@
+import { api } from "../lib/api";
 import { useMemo, useState } from "react";
 import { Icon } from "../components/Icon";
 import { Modal } from "../components/Modal";
@@ -5,7 +6,7 @@ import { Sparkline } from "../components/Sparkline";
 import { SearchInput } from "../components/Controls";
 import { bytes, clock, latencyTone, protocolLabel, rate, transportLabel } from "../lib/format";
 import { useLang, useStore, useT } from "../store";
-import type { NodeView, RoutingPolicy, TakeoverMode } from "../lib/types";
+import type { ConnectionState, NodeView, RoutingPolicy, TakeoverMode } from "../lib/types";
 
 /** Circuit-board motif on the status card, drawn once. */
 function Motif() {
@@ -61,6 +62,30 @@ function phaseSub(t: (key: string) => string, phase: string, mode: TakeoverMode)
   }
 }
 
+function LanAccess({ lan }: { lan: NonNullable<ConnectionState["lan"]> }) {
+  const t = useT();
+  const [credentials, setCredentials] = useState<{ username: string; password: string }>();
+  const [error, setError] = useState(false);
+  return (
+    <section className="panel" style={{ marginTop: 16 }}>
+      <div className="panel-head">
+        <h2 className="panel-title">{t("settings.allowLan")}</h2>
+        <button type="button" className="btn btn-outline btn-sm" onClick={async () => {
+          if (credentials) { setCredentials(undefined); return; }
+          setError(false);
+          try { setCredentials(await api.lanCredentials()); } catch { setError(true); }
+        }}>{t(credentials ? "connection.hideLan" : "connection.showLan")}</button>
+      </div>
+      <div className="panel-body">
+        <p className="mono">HTTP {lan.address}:{lan.httpPort} · SOCKS {lan.address}:{lan.socksPort}</p>
+        <p className="field-hint">{t("connection.lanHint")}</p>
+        {credentials ? <p className="mono">{credentials.username} / {credentials.password}</p> : null}
+        {error ? <p role="alert">{t("connection.lanUnavailable")}</p> : null}
+      </div>
+    </section>
+  );
+}
+
 export function ConnectionPage() {
   const t = useT();
   const lang = useLang();
@@ -69,6 +94,7 @@ export function ConnectionPage() {
   const connect = useStore((state) => state.connect);
   const disconnect = useStore((state) => state.disconnect);
   const retry = useStore((state) => state.retry);
+  const installCore = useStore((state) => state.installCore);
   const switchNode = useStore((state) => state.switchNode);
   const setMode = useStore((state) => state.setMode);
   const setPolicy = useStore((state) => state.setPolicy);
@@ -108,14 +134,29 @@ export function ConnectionPage() {
   const up = rate(snapshot.traffic.upBps);
   const isBusy = phase === "connecting" || phase === "disconnecting" || busy !== null;
 
-  const headline = phase === "failed" && mode === "tun" ? t("connection.failedTun") : phaseHeadline(t, phase);
+  const headline = phase === "connected" && mode === "manual" ? t("connection.localOnly") : phase === "failed" && mode === "tun" ? t("connection.failedTun") : phaseHeadline(t, phase);
   const subline = phase === "failed" && mode === "tun" ? t("connection.failedTunSub") : phaseSub(t, phase, mode);
+
+  const issue = connection.error ?? connection.takeoverError;
+  const issueText = typeof issue === "string" ? issue : issue?.detail ?? (issue ? t(issue.key) : undefined);
+  const requiredCore = phase === "failed" && typeof issue !== "string" && issue?.code === "core_missing"
+    ? issue.requiredCore : undefined;
+  const missingCore = requiredCore && !snapshot.cores.some((core) => core.kind === requiredCore && core.installed && !core.lastError)
+    ? requiredCore : undefined;
 
   const primary =
     phase === "connected"
       ? { label: t("connection.disconnect"), action: () => void disconnect(), tone: "btn-primary" }
+      : missingCore
+        ? {
+            label: busy === "install-core" ? t("connection.installingCore") : t("connection.installAndRetry", { core: missingCore }),
+            action: async () => {
+              if (await installCore(missingCore)) await retry();
+            },
+            tone: "btn-primary",
+          }
       : phase === "failed"
-        ? { label: t("common.retry"), action: () => void retry(), tone: "btn-primary" }
+        ? { label: t(connection.error?.code === "proxy_recovery_pending" ? "connection.retryRecovery" : "common.retry"), action: () => void retry(), tone: "btn-primary" }
         : {
             label: phase === "connecting" ? t("connection.connecting") : t("connection.connect"),
             action: () => {
@@ -143,17 +184,14 @@ export function ConnectionPage() {
                 <span className="sep">·</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
                   {protocolLabel(selected.protocol)} · {transportLabel(selected.transport)}
+                  {connection.core ? ` · ${connection.core}` : ""}
                 </span>
               </>
             ) : (
               <span>{t("connection.noNodesHint")}</span>
             )}
           </div>
-          {connection.error || connection.takeoverError ? (
-            <p className="status-error">
-              {connection.error?.detail ?? connection.takeoverError}
-            </p>
-          ) : null}
+          {issueText ? <p className="status-error">{issueText}</p> : null}
           <div className="status-actions">
             <button
               type="button"
@@ -161,7 +199,7 @@ export function ConnectionPage() {
               onClick={primary.action}
               disabled={isBusy || (!selected && phase !== "failed")}
             >
-              {phase === "connecting" ? <Icon name="refresh" size={15} className="spin" /> : null}
+              {phase === "connecting" || busy === "install-core" ? <Icon name="refresh" size={15} className="spin" /> : null}
               {primary.label}
             </button>
             <button type="button" className="btn btn-outline" onClick={() => setPickerOpen(true)} disabled={nodes.length === 0}>
@@ -199,6 +237,9 @@ export function ConnectionPage() {
         </section>
       </div>
 
+      {phase === "connected" && connection.lan
+        ? <LanAccess key={connection.startedAt} lan={connection.lan} /> : null}
+
       <section className="panel" style={{ marginTop: 16 }}>
         <div className="panel-body">
           <div className="form-grid">
@@ -217,7 +258,7 @@ export function ConnectionPage() {
                 <option value="system-proxy">{t("connection.mode.system")}</option>
                 <option value="pac">{t("connection.mode.pac")}</option>
                 <option value="manual">{t("connection.mode.manual")}</option>
-                <option value="tun">{t("connection.mode.tun")}</option>
+                {(snapshot.tunAvailable || mode === "tun") ? <option value="tun" disabled={!snapshot.tunAvailable}>{t("connection.mode.tun")}</option> : null}
               </select>
               {mode === "tun" ? <p className="field-hint">{t("connection.mode.tunHint")}</p> : null}
               {mode === "pac" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
@@ -245,9 +286,9 @@ export function ConnectionPage() {
                   {snapshot.connection.apiPort ? ` · API ${snapshot.connection.apiPort}` : ""}
                 </p>
               ) : null}
-              {snapshot.connection.mode === "pac" ? (
+              {snapshot.connection.pacUrl ? (
                 <p className="field-hint mono" style={{ marginTop: 6 }}>
-                  PAC http://127.0.0.1:10811/proxy.pac
+                  PAC {snapshot.connection.pacUrl}
                 </p>
               ) : null}
             </div>
@@ -281,7 +322,7 @@ export function ConnectionPage() {
                     <span>{node.remark}</span>
                   </div>
                   <div className="node-sub">
-                    {protocolLabel(node.protocol)} · {transportLabel(node.transport)} · {node.core}
+                    {protocolLabel(node.protocol)} · {transportLabel(node.transport)} · {connection.profileId === node.id ? connection.core ?? node.core : node.core}
                   </div>
                 </div>
                 <div className="latency" data-tone={latencyTone(node.latency?.ms)}>

@@ -1,7 +1,7 @@
 //! The one error shape the UI understands.
 
 use serde::{Deserialize, Serialize};
-use v2rayr_domain::{DomainError, ErrorCode};
+use v2rayr_domain::{CoreKind, DomainError, ErrorCode};
 
 /// A user-presentable failure.
 ///
@@ -16,6 +16,8 @@ pub struct Problem {
     pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_core: Option<CoreKind>,
     pub retryable: bool,
 }
 
@@ -26,6 +28,7 @@ impl Problem {
             key: format!("error.{code}"),
             code,
             detail: None,
+            required_core: None,
             retryable,
         }
     }
@@ -59,6 +62,7 @@ impl From<DomainError> for Problem {
             key: error.key(),
             code: error.code().as_str().to_owned(),
             detail: error.detail().map(str::to_owned),
+            required_core: None,
         }
     }
 }

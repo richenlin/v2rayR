@@ -1,3 +1,5 @@
+import { listen } from "@tauri-apps/api/event";
+import { isPreview } from "./lib/api";
 import { useEffect } from "react";
 import { Rail } from "./components/Rail";
 import { TopBar } from "./components/TopBar";
@@ -7,9 +9,10 @@ import { NodesPage } from "./pages/Nodes";
 import { SettingsPage } from "./pages/Settings";
 import { SpeedtestPage } from "./pages/Speedtest";
 import { SubscriptionsPage } from "./pages/Subscriptions";
-import { pageFromHash, useStore } from "./store";
+import { pageFromHash, useStore, useT } from "./store";
 
 export default function App() {
+  const t = useT();
   const page = useStore((state) => state.page);
   const navigate = useStore((state) => state.navigate);
   const boot = useStore((state) => state.boot);
@@ -22,6 +25,16 @@ export default function App() {
   useEffect(() => {
     void boot();
   }, [boot]);
+
+  useEffect(() => {
+    if (isPreview) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("app-update-available", ({ payload }) => {
+      useStore.getState().toast("info", t("maintenance.updateAvailable"), payload);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
+  }, [t]);
 
   // Keep the URL and the visible page in sync, so reloads land where the user was.
   useEffect(() => {

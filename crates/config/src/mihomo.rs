@@ -29,7 +29,12 @@ pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
 
     let mut root = Map::new();
     root.insert("mixed-port".into(), json!(plan.inbound.port));
-    root.insert("allow-lan".into(), json!(plan.inbound.allow_lan));
+    if plan.inbound.lan.is_some() {
+        return Err(ConfigError::InvalidPlan(
+            "mihomo 尚不支持独立认证 LAN 入站".into(),
+        ));
+    }
+    root.insert("allow-lan".into(), json!(false));
     root.insert("bind-address".into(), json!(plan.inbound.listen));
     root.insert(
         "mode".into(),
@@ -330,9 +335,8 @@ mod tests {
                 listen: "127.0.0.1".into(),
                 port: 10808,
                 http_port: None,
-                allow_lan: false,
-                username: None,
-                password: None,
+                dokodemo: None,
+                lan: None,
             },
             api: ApiPlan {
                 port: 10812,

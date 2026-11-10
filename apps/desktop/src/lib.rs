@@ -5,12 +5,15 @@
 //! CI without a display server and means the CLI and the GUI cannot drift.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use v2rayr_app::{App, AppOptions, ConnectionRequest, ImportRequest, Settings, SubscriptionQuota};
 use v2rayr_ipc::{Problem, SessionRequest, SettingsPatch};
@@ -20,6 +23,8 @@ struct Shell {
     app: Arc<App>,
     /// Held for the lifetime of the process; dropping it releases the lock.
     _instance: Option<InstanceGuard>,
+    quit_stage: AtomicU8,
+    updating: AtomicBool,
 }
 
 /// Forwards app events to the webview. The frontend subscribes with `listen()`.
@@ -60,6 +65,11 @@ async fn session_connect(
     };
     let snapshot = state.app.connect(request).await?;
     Ok(serde_json::to_value(snapshot).unwrap_or(Value::Null))
+}
+
+#[tauri::command]
+fn session_lan_credentials(state: State<'_, Shell>) -> Result<Value, Problem> {
+    state.app.reveal_lan_credentials()
 }
 
 #[tauri::command]
@@ -124,6 +134,11 @@ fn node_share_link(state: State<'_, Shell>, id: Uuid) -> Result<String, Problem>
 }
 
 #[tauri::command]
+async fn pac_update(state: State<'_, Shell>) -> Result<usize, Problem> {
+    state.app.update_pac_rules().await
+}
+
+#[tauri::command]
 fn nodes_import_text(state: State<'_, Shell>, text: String) -> Result<Value, Problem> {
     let summary = state.app.import_text(&ImportRequest {
         text,
@@ -185,6 +200,94 @@ fn subscription_set_enabled(state: State<'_, Shell>, id: Uuid, enabled: bool) ->
 }
 
 #[tauri::command]
+async fn backup_export(handle: AppHandle, state: State<'_, Shell>) -> Result<bool, Problem> {
+    let Some(path) = handle.dialog().file().add_filter("v2rayR backup", &["json"])
+        .set_file_name("v2rayr-backup.json").blocking_save_file() else { return Ok(false) };
+    let path = path.into_path().map_err(|_| Problem::config("请选择本地文件"))?;
+    state.app.export_portable_backup()?.write_new(&path)?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn backup_preview(handle: AppHandle) -> Result<Option<Value>, Problem> {
+    let Some(path) = handle.dialog().file().add_filter("v2rayR backup", &["json"])
+        .blocking_pick_file() else { return Ok(None) };
+    let path = path.into_path().map_err(|_| Problem::config("请选择本地文件"))?;
+    let backup = v2rayr_app::backup::PortableBackup::read(&path)?;
+    Ok(Some(json!({"summary":backup.summary(),"content":backup})))
+}
+
+#[tauri::command]
+async fn backup_apply(state: State<'_, Shell>, content: Value) -> Result<usize, Problem> {
+    let bytes = serde_json::to_vec(&content).map_err(|_| Problem::config("无效备份"))?;
+    let backup = v2rayr_app::backup::PortableBackup::decode(&bytes)?;
+    state.app.import_portable_backup(backup).await
+}
+
+#[tauri::command]
+async fn backup_webdav_read(url: String, username: Option<String>, password: Option<String>) -> Result<Value, Problem> {
+    let (backup, _) = v2rayr_app::backup::PortableBackup::webdav_get(
+        &url, username.as_deref().zip(password.as_deref()),
+    ).await?;
+    Ok(json!({"summary":backup.summary(),"content":backup}))
+}
+
+#[tauri::command]
+async fn backup_webdav_create(state: State<'_, Shell>, url: String, username: Option<String>, password: Option<String>) -> Result<(), Problem> {
+    state.app.export_portable_backup()?.webdav_put(
+        &url, username.as_deref().zip(password.as_deref()), None,
+    ).await
+}
+
+fn updates_configured(handle: &AppHandle) -> bool {
+    handle.config().plugins.0.get("updater").is_some_and(|config| {
+        config.get("requireSignedVersion").and_then(Value::as_bool) == Some(true)
+        && config.get("pubkey").and_then(Value::as_str).is_some_and(|key| !key.trim().is_empty())
+            && config.get("endpoints").and_then(Value::as_array).is_some_and(|endpoints| !endpoints.is_empty())
+    }) && (!cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some())
+}
+
+fn update_error() -> Problem {
+    Problem::new("app_update_failed", true).with_detail("应用更新失败：请检查网络、安装包格式或签名")
+}
+
+async fn find_app_update(handle: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, Problem> {
+    if !updates_configured(handle) { return Ok(None); }
+    handle.updater().map_err(|_| update_error())?.check().await.map_err(|_| update_error())
+}
+
+#[tauri::command]
+fn app_updates_configured(handle: AppHandle) -> bool {
+    updates_configured(&handle)
+}
+
+#[tauri::command]
+async fn app_check_update(handle: AppHandle) -> Result<Option<String>, Problem> {
+    Ok(find_app_update(&handle).await?.map(|update| update.version))
+}
+
+#[tauri::command]
+async fn app_install_update(handle: AppHandle, state: State<'_, Shell>, expected_version: String) -> Result<(), Problem> {
+    if state.updating.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return Err(Problem::new("app_update_busy", true));
+    }
+    struct UpdateGuard<'a>(&'a AtomicBool);
+    impl Drop for UpdateGuard<'_> {
+        fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    }
+    let _guard = UpdateGuard(&state.updating);
+    let update = find_app_update(&handle).await?.filter(|update| update.version == expected_version)
+        .ok_or_else(|| Problem::new("app_update_changed", true).with_detail("可用版本已变更，请重新检查后再安装"))?;
+    let bytes = update.download(|_, _| {}, || {}).await.map_err(|_| update_error())?;
+    state.app.with_network_stopped(|| {
+        update.install(bytes).map_err(|_| update_error())?;
+        state.quit_stage.store(2, Ordering::Release);
+        handle.request_restart();
+        Ok(())
+    }).await
+}
+
+#[tauri::command]
 fn settings_get(state: State<'_, Shell>) -> Value {
     serde_json::to_value(state.app.settings_view()).unwrap_or(Value::Null)
 }
@@ -199,8 +302,8 @@ async fn settings_update(
 }
 
 #[tauri::command]
-fn settings_reset(state: State<'_, Shell>) -> Result<Value, Problem> {
-    let snapshot = state.app.settings_reset()?;
+async fn settings_reset(state: State<'_, Shell>) -> Result<Value, Problem> {
+    let snapshot = state.app.settings_reset().await?;
     Ok(serde_json::to_value(snapshot.settings).unwrap_or(Value::Null))
 }
 
@@ -290,10 +393,8 @@ pub fn run() {
             return;
         }
         Err(error) => {
-            // A lock we cannot take is not a reason to refuse to start; the
-            // worst case is two windows, which is what we would have anyway.
-            tracing::warn!(%error, "single-instance lock unavailable");
-            None
+            tracing::error!(%error, "single-instance lock unavailable");
+            return;
         }
     };
 
@@ -302,15 +403,27 @@ pub fn run() {
     // the app object and the UI picks up the result on its next snapshot.
     let clipboard = pending_imports();
 
-    tauri::Builder::default()
-        .setup(move |handle| {
+    let context = tauri::generate_context!();
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    if context.config().plugins.0.contains_key("updater") {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder.setup(move |handle| {
             let app_paths = app_paths.clone();
             let events = Arc::new(TauriEvents {
                 handle: handle.handle().clone(),
             });
+            let mut options = AppOptions::new(env!("CARGO_PKG_VERSION")).with_events(events);
+            let executable = std::env::current_exe()?;
+            if let Some(binaries) = executable.parent() {
+                options = options.with_bundled_cores(
+                    binaries.to_path_buf(),
+                    handle.path().resource_dir()?.join("xray-assets"),
+                );
+            }
             let app = App::open(
                 app_paths,
-                AppOptions::new(env!("CARGO_PKG_VERSION")).with_events(events),
+                options,
             )
             .map_err(|problem| Box::<dyn std::error::Error>::from(problem.to_string()))?;
 
@@ -322,6 +435,30 @@ pub fn run() {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
+
+            let scheduler = Arc::clone(&app);
+            tauri::async_runtime::spawn(async move {
+                if !scheduler.settings().subscription.update_on_start {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                loop {
+                    let _ = scheduler.refresh_due_subscriptions().await;
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            });
+
+            if updates_configured(handle.handle()) {
+                let updater = handle.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    loop {
+                        if let Ok(Some(update)) = find_app_update(&updater).await {
+                            let _ = updater.emit("app-update-available", update.version);
+                        }
+                        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+                    }
+                });
+            }
 
             if !clipboard.is_empty() {
                 let importer = Arc::clone(&app);
@@ -355,6 +492,8 @@ pub fn run() {
             let app_for_launch = Arc::clone(&app);
             handle.manage(Shell {
                 app,
+                quit_stage: AtomicU8::new(0),
+                updating: AtomicBool::new(false),
                 _instance: instance,
             });
             if auto_connect {
@@ -396,7 +535,7 @@ pub fn run() {
                 let Some(shell) = window.app_handle().try_state::<Shell>() else {
                     return;
                 };
-                if shell.app.settings().startup.close_to_tray {
+                if shell.app.settings().startup.close_to_tray && window.app_handle().tray_by_id("main").is_some() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -407,6 +546,7 @@ pub fn run() {
             app_version,
             session_connect,
             session_disconnect,
+            session_lan_credentials,
             session_switch,
             session_set_policy,
             session_set_mode,
@@ -417,12 +557,21 @@ pub fn run() {
             node_set_tags,
             node_share_link,
             nodes_import_text,
+            pac_update,
             nodes_test_latency,
             subscriptions_list,
             subscription_add,
             subscription_update,
             subscription_remove,
             subscription_set_enabled,
+            backup_export,
+            backup_preview,
+            backup_apply,
+            backup_webdav_read,
+            backup_webdav_create,
+            app_updates_configured,
+            app_check_update,
+            app_install_update,
             settings_get,
             settings_update,
             settings_reset,
@@ -436,8 +585,35 @@ pub fn run() {
             logs_tail,
             paths,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running v2rayR");
+        .build(context)
+        .expect("error while building v2rayR")
+        .run(|handle, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let Some(shell) = handle.try_state::<Shell>() else { return };
+                if shell.quit_stage.load(Ordering::Acquire) == 2 { return; }
+                api.prevent_exit();
+                if shell.quit_stage.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                    return;
+                }
+                let app = Arc::clone(&shell.app);
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = app.disconnect().await;
+                    let Some(shell) = handle.try_state::<Shell>() else { return };
+                    match result {
+                        Ok(_) => {
+                            shell.quit_stage.store(2, Ordering::Release);
+                            handle.exit(0);
+                        }
+                        Err(problem) => {
+                            shell.quit_stage.store(0, Ordering::Release);
+                            tracing::warn!(?problem, "cannot quit before restoring system proxy");
+                            show_main(&handle);
+                        }
+                    }
+                });
+            }
+        });
 }
 
 

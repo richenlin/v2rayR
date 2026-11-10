@@ -108,10 +108,12 @@ fn outbound_to_profile(outbound: &Value) -> Result<Profile, String> {
         "hysteria2" => Protocol::Hysteria2 {
             password: Secret::new(str_field(outbound, "password").unwrap_or_default()),
             obfs: outbound.get("obfs").and_then(|obfs| {
-                obfs.get("type").and_then(Value::as_str)?;
+                let kind = obfs
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .and_then(ObfsKind::parse)?;
                 Some(Hysteria2Obfs {
-                    // sing-box only ships salamander.
-                    kind: ObfsKind::Salamander,
+                    kind,
                     password: Secret::new(
                         obfs.get("password")
                             .and_then(Value::as_str)
