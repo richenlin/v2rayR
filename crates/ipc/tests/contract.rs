@@ -42,6 +42,7 @@ fn snapshot_is_camel_case_and_carries_the_pages_data() {
         },
         connection: ConnectionState::default(),
         tun_available: false,
+        tun_rule_routing: false,
         settings: SettingsView::default(),
         active_node: None,
         nodes: vec![NodeView {

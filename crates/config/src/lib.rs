@@ -6,6 +6,7 @@
 //! ordering is the whole point of this crate — a bad config must fail here, not
 //! as a kernel crash after the UI already said "已连接".
 
+pub mod application_ingress;
 pub mod capability;
 pub mod mihomo;
 pub mod plan;

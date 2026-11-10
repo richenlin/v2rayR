@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Modal } from "../components/Modal";
 import { Icon } from "../components/Icon";
 import { Field, SearchInput, Select, Toggle } from "../components/Controls";
 import { problemTextSafe, useLang, useStore, useT } from "../store";
@@ -11,9 +12,9 @@ import type {
   StartupSettings,
   SubscriptionSettings,
 } from "../lib/types";
-import { api, resetPreviewData, type BackupPreview } from "../lib/api";
+import { api, resetPreviewData, toProblem, type BackupPreview } from "../lib/api";
 import { isPreview } from "../lib/api";
-import type { RuleView } from "../lib/types";
+import type { RuleApplication, RuleView } from "../lib/types";
 
 type EditableGroup = Exclude<SettingsGroupId, "advanced">;
 type Group = EditableGroup | "diagnostics";
@@ -68,61 +69,29 @@ function PacUpdate() {
   );
 }
 
+function applicationName(path: string) {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+function ruleKindLabel(t: ReturnType<typeof useT>, kind: string) {
+  return t(`settings.rules.kind.${kind.replace(/-([a-z])/g, (_, c) => c.toUpperCase())}`);
+}
+
 function RulesEditor() {
   const t = useT();
   const rules = useStore((state) => state.rules);
-  const addRule = useStore((state) => state.addRule);
   const toggleRule = useStore((state) => state.toggleRule);
   const removeRule = useStore((state) => state.removeRule);
-  const [kind, setKind] = useState<string>("domain-suffix");
-  const [value, setValue] = useState("");
-  const [action, setAction] = useState<string>("direct");
-
-  const submit = async () => {
-    const ok = await addRule(kind, value, action);
-    if (ok) setValue("");
-  };
-
+  const [editor, setEditor] = useState<RuleView | "new" | null>(null);
+  const close = useCallback(() => setEditor(null), []);
   return (
     <div className="rules-block">
       <div className="rules-head">
         <div>
-          <p className="field-label">{t("settings.rules.title")}</p>
+          <p className="field-label">{t("settings.rules.title")} <span className="badge" data-tone="active">{rules.length}</span></p>
           <p className="field-hint">{t("settings.rules.hint")}</p>
         </div>
-        <span className="badge" data-tone="active">
-          {rules.length}
-        </span>
-      </div>
-      <div className="rules-add">
-        <Select
-          label={t("settings.rules.kind")}
-          value={kind}
-          onChange={setKind}
-          options={RULE_KINDS.map((item) => ({
-            value: item,
-            label: t(`settings.rules.kind.${item.replace(/-([a-z])/g, (_, c) => c.toUpperCase())}`),
-          }))}
-        />
-        <input
-          className="control control-mono"
-          aria-label={t("settings.rules.value")}
-          placeholder={kind === "ip-cidr" ? "10.0.0.0/8" : "example.com"}
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void submit();
-          }}
-        />
-        <Select
-          label={t("settings.rules.action")}
-          value={action}
-          onChange={setAction}
-          options={RULE_ACTIONS.map((item) => ({ value: item, label: t(`settings.rules.action.${item}`) }))}
-        />
-        <button type="button" className="btn btn-outline btn-sm" onClick={() => void submit()} disabled={!value.trim()}>
-          {t("settings.rules.add")}
-        </button>
+        <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditor("new")}>{t("settings.rules.add")}</button>
       </div>
       {rules.length === 0 ? (
         <p className="field-hint">{t("settings.rules.empty")}</p>
@@ -131,11 +100,17 @@ function RulesEditor() {
           {rules.map((rule: RuleView) => (
             <li key={rule.id} className="rules-row" data-disabled={!rule.enabled || undefined}>
               <Toggle checked={rule.enabled} label={t("settings.rules.enabled")} onChange={(checked) => void toggleRule(rule.id, checked)} />
-              <span className="mono rules-kind">{rule.kind}</span>
+              <span className="rules-kind">{ruleKindLabel(t, rule.kind)}</span>
               <span className="mono rules-value">{rule.value}</span>
+              <span className="mono rules-value" aria-label={t("settings.rules.application")} title={rule.applications?.map((app) => app.path).join("\n")}>
+                {rule.applications?.length ? rule.applications.map((app) => applicationName(app.path)).join(", ") : "*"}
+              </span>
               <span className="badge" data-tone={rule.action === "block" ? "danger" : rule.action === "direct" ? "ok" : "active"}>
                 {t(`settings.rules.action.${rule.action}`)}
               </span>
+              <button type="button" className="btn btn-quiet btn-sm rules-edit" onClick={() => setEditor(rule)}>
+                {t("settings.rules.edit")}
+              </button>
               <button
                 type="button"
                 className="btn btn-quiet btn-sm rules-remove"
@@ -148,7 +123,115 @@ function RulesEditor() {
           ))}
         </ul>
       )}
+      {editor ? <RuleModal rule={editor === "new" ? undefined : editor} onClose={close} /> : null}
     </div>
+  );
+}
+
+function RuleModal({ rule, onClose }: { rule?: RuleView; onClose: () => void }) {
+  const t = useT();
+  const addRule = useStore((state) => state.addRule);
+  const updateRule = useStore((state) => state.updateRule);
+  const [saving, setSaving] = useState(false);
+  const [kind, setKind] = useState(rule?.kind ?? "domain-suffix");
+  const [value, setValue] = useState(rule?.value ?? "");
+  const [action, setAction] = useState(rule?.action ?? "direct");
+
+  const [candidates, setCandidates] = useState<RuleApplication[]>(rule?.applications ?? []);
+  const [selected, setSelected] = useState<RuleApplication[]>(rule?.applications ?? []);
+  const [picking, setPicking] = useState(false);
+  const [pickerError, setPickerError] = useState("");
+
+  const pick = async () => {
+    setPicking(true);
+    setPickerError("");
+    try {
+      const found = await api.pickRuleApplications();
+      const main = found[0];
+      if (!main) return;
+      setCandidates((current) => [...new Map([...current, ...found].map((app) => [app.path, app])).values()]);
+      setSelected((current) => [...current.filter((app) => app.path !== main.path), main]);
+    } catch (error) {
+      setPickerError(problemTextSafe(useStore.getState().lang, toProblem(error)));
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  const submit = async () => {
+    if (saving || picking || !value.trim()) return;
+    setSaving(true);
+    try {
+      const ok = rule ? await updateRule(rule.id, kind, value, action, selected) : await addRule(kind, value, action, selected);
+      if (ok) onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+  const close = useCallback(() => {
+    if (!saving && !picking) onClose();
+  }, [onClose, saving, picking]);
+
+  return (
+    <Modal title={t(rule ? "settings.rules.edit" : "settings.rules.add")} onClose={close}
+      footer={<>
+        <button type="button" className="btn btn-outline" onClick={close} disabled={saving || picking}>{t("common.cancel")}</button>
+        <button type="submit" form="custom-rule-form" className="btn btn-primary" disabled={saving || picking || !value.trim()}>{t("settings.rules.save")}</button>
+      </>}
+    >
+      <form id="custom-rule-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      <div className="rules-add">
+        <Select
+          label={t("settings.rules.kind")}
+          value={kind}
+          onChange={setKind}
+          options={RULE_KINDS.map((item) => ({
+            value: item,
+            label: ruleKindLabel(t, item),
+          }))}
+        />
+        <input
+          className="control control-mono"
+          aria-label={t("settings.rules.value")}
+          placeholder={kind === "ip-cidr" ? "10.0.0.0/8" : "example.com"}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+        />
+        <Select
+          label={t("settings.rules.action")}
+          value={action}
+          onChange={setAction}
+          options={RULE_ACTIONS.map((item) => ({ value: item, label: t(`settings.rules.action.${item}`) }))}
+        />
+      </div>
+      <div className="rule-app-picker">
+        <span className="field-label">{t("settings.rules.application")}</span>
+        <span className="mono">{selected.length || "*"}</span>
+        <button type="button" className="btn btn-outline btn-sm" disabled={picking || api.kind === "mock"} onClick={() => void pick()}>
+          {t("settings.rules.pickApplication")}
+        </button>
+        {candidates.length > 0 ? (
+          <div className="rule-app-candidates">
+            {candidates.map((app) => (
+              <label key={app.path} title={app.path}>
+                <input
+                  type="checkbox"
+                  checked={selected.some((item) => item.path === app.path)}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setSelected((current) => checked ? [...current, app] : current.filter((item) => item.path !== app.path));
+                  }}
+                />
+                <span>{applicationName(app.path)}<small className="mono">{app.path}</small></span>
+              </label>
+            ))}
+          </div>
+        ) : null}
+        {pickerError ? <p className="field-hint" role="alert">{pickerError}</p> : null}
+      </div>
+      <p className="field-hint">{t("settings.rules.applicationPending")}</p>
+      </form>
+    </Modal>
   );
 }
 

@@ -1163,13 +1163,36 @@ textarea.control {
 }
 .rules-add {
   display: grid;
-  grid-template-columns: 168px minmax(0, 1fr) 132px auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr);
   gap: 8px;
   align-items: center;
 }
 .rules-add select.control {
   max-width: none;
   width: 100%;
+}
+.rule-app-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+.rule-app-candidates {
+  flex-basis: 100%;
+  max-height: 12rem;
+  overflow: auto;
+}
+.rule-app-candidates label {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  padding: 5px 0;
+}
+.rule-app-candidates small {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 .rules-list {
   list-style: none;
@@ -1180,7 +1203,7 @@ textarea.control {
 }
 .rules-row {
   display: grid;
-  grid-template-columns: 44px 120px minmax(0, 1fr) 64px 32px;
+  grid-template-columns: 44px 120px minmax(0, 1fr) minmax(0, 1fr) 64px auto 32px;
   gap: 10px;
   align-items: center;
   padding: 7px 10px;
@@ -1201,6 +1224,9 @@ textarea.control {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.rules-edit {
+  white-space: nowrap;
+}
 .rules-remove {
   padding: 3px 5px !important;
   color: var(--muted);
@@ -1213,6 +1239,6 @@ textarea.control {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
   .rules-row {
-    grid-template-columns: 40px 96px minmax(0, 1fr) 56px 30px;
+    grid-template-columns: 40px 96px minmax(0, 1fr) minmax(0, 1fr) 56px auto 30px;
   }
 }

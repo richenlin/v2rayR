@@ -82,16 +82,34 @@ async fn app_tun_captures_traffic_and_releases_the_network() {
             subscription_id: None,
         })
         .unwrap();
+    let rules_mode = std::env::var("V2RAYR_TEST_TUN_RULES");
+    let block_probe = rules_mode.as_deref() == Ok("block");
+    let policy = if rules_mode.as_deref() == Ok("1") || block_probe {
+        assert!(tun::RULE_ROUTING_SUPPORTED);
+        let applications = v2rayr_app::inspect_rule_applications(&std::env::current_exe().unwrap())
+            .unwrap();
+        let action = if block_probe { "block" } else { "proxy" };
+        app.add_rule_for_applications("ip-cidr", "198.51.100.20/32", action, &applications)
+            .unwrap();
+        RoutingPolicy::Rule
+    } else {
+        RoutingPolicy::Global
+    };
     let snapshot = app
         .connect(ConnectionRequest {
             profile_id: import.report.added[0].id,
             mode: TakeoverMode::Tun,
-            policy: RoutingPolicy::Global,
+            policy,
         })
         .await
         .unwrap();
     assert_eq!(snapshot.connection.phase, ConnectionPhase::Connected);
     assert!(snapshot.connection.takeover_applied);
+    assert_eq!(snapshot.connection.policy, policy);
+    if policy == RoutingPolicy::Rule {
+        let result = v2rayr_engine::latency::verify_tun_route("http://198.51.100.20/health").await;
+        assert_eq!(result.is_err(), block_probe, "{result:?}");
+    }
     assert!(!tun::network_cleared());
     #[cfg(target_os = "macos")]
     assert!(mac_tun_dns_advertised());

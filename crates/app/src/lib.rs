@@ -13,6 +13,7 @@ pub mod latency;
 pub mod logging;
 mod pac_rules;
 mod rules;
+pub use rules::inspect_rule_applications;
 pub mod session;
 pub mod settings;
 pub mod subscriptions;
@@ -553,6 +554,7 @@ impl App {
                     v2rayr_platform::tun::provisioned()
                 }
             },
+            tun_rule_routing: v2rayr_platform::tun::RULE_ROUTING_SUPPORTED,
             settings: settings.view(self.settings_revision.load(Ordering::Relaxed)),
             active_node,
             nodes,

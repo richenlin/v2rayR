@@ -403,6 +403,7 @@ fn routing(plan: &SessionPlan) -> Value {
     }
 
     if plan.policy == RoutingMode::Rule {
+        let custom_start = rules.len();
         for rule_set in &plan.rule_sets {
             match rule_set.kind {
                 RuleSetKind::CnSites => rules.push(json!({
@@ -423,10 +424,11 @@ fn routing(plan: &SessionPlan) -> Value {
                 RuleSetKind::Ads => {}
             }
         }
-        for rule in &plan.rules {
-            if let Some(value) = custom_rule(rule) {
-                rules.push(value);
-            }
+        let custom = plan.rules.iter().filter_map(custom_rule);
+        if plan.custom_rules_first {
+            rules.splice(custom_start..custom_start, custom);
+        } else {
+            rules.extend(custom);
         }
     }
 
@@ -516,6 +518,7 @@ mod tests {
             policy: RoutingMode::Rule,
             dns: Default::default(),
             rules: Vec::new(),
+            custom_rules_first: false,
             rule_sets: Vec::new(),
             sniffing: true,
             tcp_fast_open: true,

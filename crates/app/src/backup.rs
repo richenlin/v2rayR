@@ -7,10 +7,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use v2rayr_domain::RuleApplication;
 use v2rayr_ipc::{AppearanceSettings, ConnectionPhase, Problem, RoutingPolicy};
 use v2rayr_store::{RuleAction, RuleKind};
 
-use crate::{App, error, rules::normalize_rule_value};
+use crate::{App, error, rules::{normalize_applications, normalize_rule_value}};
 
 const VERSION: u32 = 1;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -35,6 +36,8 @@ struct PortableRule {
     value: String,
     action: String,
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    applications: Vec<RuleApplication>,
 }
 
 impl PortableBackup {
@@ -163,7 +166,7 @@ impl PortableBackup {
 }
 
 impl PortableRule {
-    fn validate(&self) -> Result<(RuleKind, String, RuleAction, bool), Problem> {
+    fn validate(&self) -> Result<(RuleKind, String, RuleAction, bool, Vec<RuleApplication>), Problem> {
         let kind =
             RuleKind::parse(&self.kind).ok_or_else(|| Problem::config("备份包含未知规则类型"))?;
         let action = RuleAction::parse(&self.action)
@@ -173,6 +176,7 @@ impl PortableRule {
             normalize_rule_value(&self.value)?,
             action,
             self.enabled,
+            normalize_applications(&self.applications)?,
         ))
     }
 }
@@ -188,6 +192,7 @@ impl App {
                 value: rule.value,
                 action: rule.action,
                 enabled: rule.enabled,
+                applications: rule.applications,
             })
             .collect();
         Ok(PortableBackup {
@@ -325,6 +330,25 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert!(rules[0].enabled);
         assert!(!rules[1].enabled);
+        assert_eq!(target.import_portable_backup(backup).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn scoped_backup_rules_do_not_merge_with_wildcard_rules() {
+        let source = crate::test_support::temp_app();
+        let target = crate::test_support::temp_app();
+        let application = RuleApplication {
+            path: "/Applications/Example.app/Contents/MacOS/Example".to_owned(),
+            sha256: "a".repeat(64),
+        };
+        source.add_rule_for_applications(
+            "domain", "example.com", "block", std::slice::from_ref(&application),
+        ).unwrap();
+        target.add_rule("domain", "example.com", "block").unwrap();
+        let backup = source.export_portable_backup().unwrap();
+        let decoded = PortableBackup::decode(&backup.encode().unwrap()).unwrap();
+        assert_eq!(target.import_portable_backup(decoded).await.unwrap(), 1);
+        assert_eq!(target.rules().unwrap()[1].applications, [application]);
         assert_eq!(target.import_portable_backup(backup).await.unwrap(), 0);
     }
 

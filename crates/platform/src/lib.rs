@@ -24,7 +24,7 @@ pub mod tun;
 use thiserror::Error;
 
 pub use autostart::{Autostart, LaunchAgentAutostart};
-pub use pac::{PacServer, render_pac, render_pac_with_rules};
+pub use pac::{PacMatch, PacOverride, PacServer, render_pac, render_pac_with_overrides, render_pac_with_rules};
 pub use paths::AppPaths;
 pub use ports::PortState;
 pub use ports::Ports;

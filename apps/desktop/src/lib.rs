@@ -27,6 +27,11 @@ struct Shell {
     updating: AtomicBool,
 }
 
+struct StartupFailure {
+    problem: Problem,
+    _instance: Option<InstanceGuard>,
+}
+
 /// Forwards app events to the webview. The frontend subscribes with `listen()`.
 struct TauriEvents {
     handle: AppHandle,
@@ -39,11 +44,13 @@ impl v2rayr_app::EventSink for TauriEvents {
 }
 
 #[tauri::command]
-fn app_snapshot(state: State<'_, Shell>) -> Result<Value, Problem> {
-    state
-        .app
-        .snapshot()
-        .map(|snapshot| serde_json::to_value(snapshot).unwrap_or(Value::Null))
+fn app_snapshot(handle: AppHandle) -> Result<Value, Problem> {
+    if let Some(failure) = handle.try_state::<StartupFailure>() {
+        return Err(failure.problem.clone());
+    }
+    let state = handle.try_state::<Shell>()
+        .ok_or_else(|| Problem::storage("应用尚未完成初始化"))?;
+    state.app.snapshot().map(|snapshot| serde_json::to_value(snapshot).unwrap_or(Value::Null))
 }
 
 #[tauri::command]
@@ -335,13 +342,37 @@ fn rules_list(state: State<'_, Shell>) -> Result<Value, Problem> {
 }
 
 #[tauri::command]
+async fn rule_pick_applications(handle: AppHandle) -> Result<Vec<v2rayr_domain::RuleApplication>, Problem> {
+    let picker = handle.dialog().file();
+    #[cfg(target_os = "macos")]
+    let picker = picker.set_directory("/Applications");
+    let Some(path) = picker.blocking_pick_file() else { return Ok(Vec::new()) };
+    let path = path.into_path().map_err(|_| Problem::config("请选择本地应用"))?;
+    v2rayr_app::inspect_rule_applications(&path)
+}
+
+#[tauri::command]
 fn rule_add(
     state: State<'_, Shell>,
     kind: String,
     value: String,
     action: String,
+    applications: Option<Vec<v2rayr_domain::RuleApplication>>,
 ) -> Result<Value, Problem> {
-    let rules = state.app.add_rule(&kind, &value, &action)?;
+    let rules = state.app.add_rule_for_applications(&kind, &value, &action, applications.as_deref().unwrap_or_default())?;
+    Ok(serde_json::to_value(rules).unwrap_or(Value::Null))
+}
+
+#[tauri::command]
+fn rule_update(
+    state: State<'_, Shell>,
+    id: uuid::Uuid,
+    kind: String,
+    value: String,
+    action: String,
+    applications: Vec<v2rayr_domain::RuleApplication>,
+) -> Result<Value, Problem> {
+    let rules = state.app.update_rule(id, &kind, &value, &action, &applications)?;
     Ok(serde_json::to_value(rules).unwrap_or(Value::Null))
 }
 
@@ -414,18 +445,24 @@ pub fn run() {
                 handle: handle.handle().clone(),
             });
             let mut options = AppOptions::new(env!("CARGO_PKG_VERSION")).with_events(events);
-            let executable = std::env::current_exe()?;
-            if let Some(binaries) = executable.parent() {
+            if let Ok(executable) = std::env::current_exe()
+                && let Some(binaries) = executable.parent()
+            {
+                let resources = handle.path().resource_dir()
+                    .unwrap_or_else(|_| binaries.join("../Resources"));
                 options = options.with_bundled_cores(
                     binaries.to_path_buf(),
-                    handle.path().resource_dir()?.join("xray-assets"),
+                    resources.join("xray-assets"),
                 );
             }
-            let app = App::open(
-                app_paths,
-                options,
-            )
-            .map_err(|problem| Box::<dyn std::error::Error>::from(problem.to_string()))?;
+            let app = match App::open(app_paths, options) {
+                Ok(app) => app,
+                Err(problem) => {
+                    eprintln!("v2rayR 无法启动：{problem}");
+                    handle.manage(StartupFailure { problem, _instance: instance });
+                    return Ok(());
+                }
+            };
 
             // Traffic pump: one tick per second, independent of the UI being open.
             let pump = Arc::clone(&app);
@@ -579,7 +616,9 @@ pub fn run() {
             cores_probe,
             cores_install,
             rules_list,
+            rule_pick_applications,
             rule_add,
+            rule_update,
             rule_set_enabled,
             rule_remove,
             logs_tail,

@@ -256,11 +256,64 @@ en0: flags=8863
     }
 }
 
+pub const RULE_ROUTING_SUPPORTED: bool = cfg!(target_os = "macos");
+pub const MAX_REQUEST_BYTES: u64 = 128 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunRule {
+    pub applications: Vec<String>,
+    pub target: TunRuleTarget,
+    pub action: TunRuleAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TunRuleTarget {
+    Any,
+    Domain(String),
+    DomainSuffix(String),
+    IpCidr(String),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TunRuleAction {
+    Proxy,
+    Direct,
+    Block,
+}
+
+impl TunRule {
+    fn valid(&self) -> bool {
+        let target = match &self.target {
+            TunRuleTarget::Any => !self.applications.is_empty(),
+            TunRuleTarget::Domain(value) | TunRuleTarget::DomainSuffix(value) => {
+                !value.is_empty() && value.len() <= 253 && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_')
+                })
+            }
+            TunRuleTarget::IpCidr(value) => value.split_once('/').is_some_and(|(ip, bits)| {
+                match (ip.parse::<std::net::IpAddr>(), bits.parse::<u8>()) {
+                    (Ok(std::net::IpAddr::V4(_)), Ok(bits)) => bits <= 32,
+                    (Ok(std::net::IpAddr::V6(_)), Ok(bits)) => bits <= 128,
+                    _ => false,
+                }
+            }),
+        };
+        target && self.applications.len() <= 32 && self.applications.iter().all(|path| {
+            path.starts_with('/') && path.len() <= 4096 && !path.chars().any(char::is_control)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunRequest {
     pub socks_port: u16,
     pub upstream: std::net::Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<TunRule>>,
 }
 
 impl TunRequest {
@@ -274,6 +327,17 @@ impl TunRequest {
             return Err(PlatformError::InvalidState(
                 "TUN 需要有效的 IPv4 节点和本机 SOCKS 端口".into(),
             ));
+        }
+        if let Some(rules) = &self.rules {
+            if !RULE_ROUTING_SUPPORTED {
+                return Err(PlatformError::Unsupported("此平台的 TUN 暂只支持全局代理"));
+            }
+            if rules.len() > 256
+                || rules.iter().any(|rule| !rule.valid())
+                || serde_json::to_vec(self).map_err(std::io::Error::other)?.len() as u64 >= MAX_REQUEST_BYTES
+            {
+                return Err(PlatformError::InvalidState("TUN 规则无效或超出大小限制".into()));
+            }
         }
         Ok(())
     }
@@ -312,6 +376,15 @@ pub fn provisioned() -> bool {
     false
 }
 
+#[cfg(target_os = "macos")]
+fn rule_helper_compatible() -> bool {
+    std::process::Command::new(HELPER)
+        .arg("tun-capabilities")
+        .env_clear()
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout == b"tun-rules-v1\n")
+}
+
 #[derive(Debug)]
 pub struct TunLease {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -343,6 +416,10 @@ impl TunLease {
             }
             #[cfg(target_os = "macos")]
             validate_apple_install()?;
+            #[cfg(target_os = "macos")]
+            if request.rules.is_some() && !rule_helper_compatible() {
+                return Err(PlatformError::Unsupported("请更新已部署的 TUN helper 以启用规则分流"));
+            }
             let mut child = Command::new("/usr/bin/sudo")
                 .args(["-n", "--", HELPER, "tun-stdio"])
                 .stdin(Stdio::piped())

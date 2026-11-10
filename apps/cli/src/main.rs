@@ -61,8 +61,9 @@ enum Command {
         node: String,
         #[arg(long, default_value = "manual")]
         mode: String,
-        #[arg(long, default_value = "rule")]
-        policy: String,
+        /// Defaults to global for TUN and rule for other modes.
+        #[arg(long)]
+        policy: Option<String>,
     },
     /// Tear the session down.
     Disconnect,
@@ -71,8 +72,9 @@ enum Command {
         node: String,
         #[arg(long, default_value = "manual")]
         mode: String,
-        #[arg(long, default_value = "rule")]
-        policy: String,
+        /// Defaults to global for TUN and rule for other modes.
+        #[arg(long)]
+        policy: Option<String>,
     },
     /// Measure TCP latency to one node, or to every node.
     Test { node: Option<String> },
@@ -177,14 +179,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Import { source } => import(&app, &source, cli.json),
         Command::Sub { action } => subscriptions(&app, action, cli.json).await,
         Command::Connect { node, mode, policy } => {
-            connect(&app, &node, &mode, &policy, cli.json).await
+            connect(&app, &node, &mode, policy.as_deref(), cli.json).await
         }
         Command::Disconnect => {
             app.disconnect().await.map_err(problem_to_anyhow)?;
             println!("已断开");
             Ok(())
         }
-        Command::Run { node, mode, policy } => run(&app, &node, &mode, &policy).await,
+        Command::Run { node, mode, policy } => run(&app, &node, &mode, policy.as_deref()).await,
         Command::Test { node } => test(&app, node.as_deref()).await,
         Command::Export { node } => {
             let link = app
@@ -417,13 +419,14 @@ async fn connect(
     app: &App,
     node: &str,
     mode: &str,
-    policy: &str,
+    policy: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
+    let mode = parse_mode(mode)?;
     let request = ConnectionRequest {
         profile_id: resolve_node(app, node)?,
-        mode: parse_mode(mode)?,
-        policy: parse_policy(policy)?,
+        mode,
+        policy: connection_policy(mode, policy)?,
     };
     match app.connect(request).await {
         Ok(snapshot) => {
@@ -497,12 +500,13 @@ async fn test(app: &App, node: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run(app: &App, node: &str, mode: &str, policy: &str) -> anyhow::Result<()> {
+async fn run(app: &App, node: &str, mode: &str, policy: Option<&str>) -> anyhow::Result<()> {
     install_interrupt_handler();
+    let mode = parse_mode(mode)?;
     let request = ConnectionRequest {
         profile_id: resolve_node(app, node)?,
-        mode: parse_mode(mode)?,
-        policy: parse_policy(policy)?,
+        mode,
+        policy: connection_policy(mode, policy)?,
     };
     app.connect(request).await.map_err(problem_to_anyhow)?;
     println!(
@@ -591,6 +595,11 @@ fn parse_mode(raw: &str) -> anyhow::Result<TakeoverMode> {
         "tun" => TakeoverMode::Tun,
         other => bail!("未知接入方式 {other}（manual / system-proxy / tun）"),
     })
+}
+
+fn connection_policy(mode: TakeoverMode, policy: Option<&str>) -> anyhow::Result<RoutingPolicy> {
+    let default = if mode == TakeoverMode::Tun { "global" } else { "rule" };
+    parse_policy(policy.unwrap_or(default))
 }
 
 fn parse_policy(raw: &str) -> anyhow::Result<RoutingPolicy> {

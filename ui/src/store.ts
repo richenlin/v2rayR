@@ -16,6 +16,7 @@ import type {
   LatencyResult,
   Problem,
   RuleView,
+  RuleApplication,
   SettingsPatch,
   TakeoverMode,
   RoutingPolicy,
@@ -76,7 +77,8 @@ interface State {
 
   saveSettings: (patches: SettingsPatch[]) => Promise<boolean>;
   loadRules: () => Promise<void>;
-  addRule: (kind: string, value: string, action: string) => Promise<boolean>;
+  addRule: (kind: string, value: string, action: string, applications: RuleApplication[]) => Promise<boolean>;
+  updateRule: (id: string, kind: string, value: string, action: string, applications: RuleApplication[]) => Promise<boolean>;
   toggleRule: (id: string, enabled: boolean) => Promise<void>;
   removeRule: (id: string) => Promise<void>;
   probeCores: () => Promise<void>;
@@ -118,6 +120,7 @@ export const useStore = create<State>((set, get) => ({
       set({
         snapshot,
         loading: false,
+        bootError: undefined,
         page: pageFromHash(),
         lang: resolveLang(snapshot.settings.appearance.language),
         themeMode:
@@ -129,7 +132,7 @@ export const useStore = create<State>((set, get) => ({
       applyDocumentLang(get().lang);
       void get().loadRules();
     } catch (error) {
-      set({ loading: false, bootError: String(error) });
+      set({ loading: false, bootError: problemTextSafe(get().lang, toProblem(error)) });
     }
   },
 
@@ -443,13 +446,23 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  addRule: async (kind, value, action) => {
+  addRule: async (kind, value, action, applications) => {
     try {
-      set({ rules: await api.addRule(kind, value, action) });
+      set({ rules: await api.addRule(kind, value, action, applications) });
       return true;
     } catch (error) {
       const problem = toProblem(error) as Problem;
       get().toast("danger", translate(get().lang, "settings.rules.add"), problemTextSafe(get().lang, problem));
+      return false;
+    }
+  },
+
+  updateRule: async (id, kind, value, action, applications) => {
+    try {
+      set({ rules: await api.updateRule(id, kind, value, action, applications) });
+      return true;
+    } catch (error) {
+      get().toast("danger", translate(get().lang, "common.saveFailed"), problemTextSafe(get().lang, toProblem(error)));
       return false;
     }
   },

@@ -21,6 +21,7 @@ import type {
   LogEntry,
   NodeView,
   RuleView,
+  RuleApplication,
   SettingsGroupId,
   SettingsPatch,
   SettingsView,
@@ -71,7 +72,9 @@ export interface Backend {
   cores(): Promise<CoreStatus[]>;
   installCore(kind: CoreKind, url?: string, sha256?: string): Promise<CoreStatus>;
   rules(): Promise<RuleView[]>;
-  addRule(kind: string, value: string, action: string): Promise<RuleView[]>;
+  pickRuleApplications(): Promise<RuleApplication[]>;
+  addRule(kind: string, value: string, action: string, applications: RuleApplication[]): Promise<RuleView[]>;
+  updateRule(id: string, kind: string, value: string, action: string, applications: RuleApplication[]): Promise<RuleView[]>;
   setRuleEnabled(id: string, enabled: boolean): Promise<RuleView[]>;
   removeRule(id: string): Promise<RuleView[]>;
   logs(limit: number): Promise<LogEntry[]>;
@@ -135,7 +138,9 @@ const tauriBackend: Backend = {
   cores: () => invoke<CoreStatus[]>("cores_probe"),
   installCore: (kind, url, sha256) => invoke<CoreStatus>("cores_install", { kind, url, sha256 }),
   rules: () => invoke<RuleView[]>("rules_list"),
-  addRule: (kind, value, action) => invoke<RuleView[]>("rule_add", { kind, value, action }),
+  pickRuleApplications: () => invoke<RuleApplication[]>("rule_pick_applications"),
+  addRule: (kind, value, action, applications) => invoke<RuleView[]>("rule_add", { kind, value, action, applications }),
+  updateRule: (id, kind, value, action, applications) => invoke<RuleView[]>("rule_update", { id, kind, value, action, applications }),
   setRuleEnabled: (id, enabled) => invoke<RuleView[]>("rule_set_enabled", { id, enabled }),
   removeRule: (id) => invoke<RuleView[]>("rule_remove", { id }),
   logs: (limit) => invoke<LogEntry[]>("logs_tail", { limit }),
@@ -524,7 +529,7 @@ function snapshot(): AppSnapshot {
       dbSchema: 1,
       commit: "preview",
     },
-    connection: { ...state.connection, lan: state.connection.phase === "connected" && state.settings.inbound.allowLan
+    connection: { ...state.connection, policy: state.connection.mode === "tun" ? "global" : state.connection.policy, lan: state.connection.phase === "connected" && state.settings.inbound.allowLan
       ? { address: state.settings.inbound.lanBind ?? "", socksPort: 10818, httpPort: 10818 }
       : undefined },
     settings: structuredClone(state.settings),
@@ -573,7 +578,7 @@ const mockBackend: Backend = {
     state.connection = {
       phase: "connecting",
       mode,
-      policy,
+      policy: mode === "tun" ? state.connection.policy : policy,
       profileId: node.id,
       profileRemark: node.remark,
       core: node.core,
@@ -646,6 +651,7 @@ const mockBackend: Backend = {
     return snapshot();
   },
   setPolicy: async (policy) => {
+    if (state.connection.mode === "tun") return snapshot();
     state.settings.routing.policy = policy;
     if (state.connection.phase === "connected") {
       state.connection = { ...state.connection, phase: "connecting", policy };
@@ -933,16 +939,26 @@ const mockBackend: Backend = {
     await wait(20);
     return state.rules.map((rule) => ({ ...rule }));
   },
-  addRule: async (kind, value, action) => {
+  pickRuleApplications: async () => [],
+  addRule: async (kind, value, action, applications) => {
     await wait(60);
     const trimmed = value.trim();
     if (!trimmed) {
       throw { code: "invalid_value", key: "error.invalid_value", detail: "规则内容不能为空", retryable: false };
     }
-    state.rules.push({ id: `r${Date.now()}`, kind, value: trimmed, action, enabled: true, position: state.rules.length });
+    state.rules.push({ id: `r${Date.now()}`, kind, value: trimmed, action, applications, enabled: true, position: state.rules.length });
     log("info", "rules", `新增规则 ${kind} ${trimmed}`);
     persist();
     return state.rules.map((rule) => ({ ...rule }));
+  },
+  updateRule: async (id, kind, value, action, applications) => {
+    const rule = state.rules.find((item) => item.id === id);
+    if (!rule) throw { code: "not_found", key: "error.not_found", retryable: false };
+    const trimmed = value.trim();
+    if (!trimmed) throw { code: "invalid_value", key: "error.invalid_value", detail: "规则内容不能为空", retryable: false };
+    Object.assign(rule, { kind, value: trimmed, action, applications });
+    persist();
+    return state.rules.map((item) => ({ ...item }));
   },
   setRuleEnabled: async (id, enabled) => {
     await wait(40);

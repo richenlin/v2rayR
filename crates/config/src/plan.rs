@@ -140,6 +140,7 @@ pub struct SessionPlan {
     pub policy: RoutingMode,
     pub dns: DnsPlan,
     pub rules: Vec<CustomRule>,
+    pub custom_rules_first: bool,
     pub rule_sets: Vec<RuleSetRef>,
     pub sniffing: bool,
     pub tcp_fast_open: bool,

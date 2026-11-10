@@ -63,6 +63,8 @@ enum Command {
     Serve,
     /// Private one-session protocol, enabled only under administrator policy.
     TunStdio,
+    /// Report support for the structured TUN routing protocol.
+    TunCapabilities,
     /// Private Windows UAC entry point; only accepts a local lease identifier.
     #[cfg(windows)]
     TunPipe { nonce: String, caller: u32 },
@@ -100,6 +102,12 @@ fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
         bail!("only tun-stdio may run with elevated privileges");
+    }
+    if matches!(cli.command, Command::TunCapabilities) {
+        if v2rayr_platform::tun::RULE_ROUTING_SUPPORTED {
+            println!("tun-rules-v1");
+        }
+        return Ok(());
     }
     let token = load_token(&cli)?;
     let proxy = MacOsSystemProxy::system();
@@ -164,7 +172,7 @@ fn into_request(command: Command) -> anyhow::Result<HelperRequest> {
             AutostartAction::Disable => HelperRequest::AutostartDisable,
         },
         Command::Status => HelperRequest::Status,
-        Command::Serve | Command::TunStdio => bail!("serve is handled separately"),
+        Command::Serve | Command::TunStdio | Command::TunCapabilities => bail!("serve is handled separately"),
         #[cfg(windows)]
         Command::TunPipe { .. } => bail!("serve is handled separately"),
     })

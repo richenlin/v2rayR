@@ -66,6 +66,37 @@ pub fn bridge_config(request: &TunRequest) -> serde_json::Value {
         inbound["interface_name"] = serde_json::json!(v2rayr_platform::tun::INTERFACE);
         inbound["strict_route"] = serde_json::json!(true);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(rules) = &request.rules {
+        use v2rayr_platform::tun::{TunRuleAction, TunRuleTarget};
+
+        // Re-evaluate rules per UDP destination, even on a shared source socket.
+        config["inbounds"][0]["udp_mapping"] = serde_json::json!("address_and_port_dependent");
+        config["outbounds"][0]["bind_interface"] = serde_json::json!("lo0");
+        config["outbounds"].as_array_mut().expect("fixed outbounds")
+            .push(serde_json::json!({"type":"direct","tag":"direct"}));
+        config["route"]["auto_detect_interface"] = serde_json::json!(true);
+        config["route"]["default_domain_resolver"] = serde_json::json!("remote");
+        config["route"]["final"] = serde_json::json!("direct");
+        let route = config["route"]["rules"].as_array_mut().expect("fixed route rules");
+        route.extend(rules.iter().map(|rule| {
+            let mut value = match rule.action {
+                TunRuleAction::Proxy => serde_json::json!({"action":"route","outbound":"bridge"}),
+                TunRuleAction::Direct => serde_json::json!({"action":"route","outbound":"direct"}),
+                TunRuleAction::Block => serde_json::json!({"action":"reject"}),
+            };
+            if !rule.applications.is_empty() {
+                value["process_path"] = serde_json::json!(rule.applications);
+            }
+            match &rule.target {
+                TunRuleTarget::Any => {}
+                TunRuleTarget::Domain(target) => value["domain"] = serde_json::json!([target]),
+                TunRuleTarget::DomainSuffix(target) => value["domain_suffix"] = serde_json::json!([target]),
+                TunRuleTarget::IpCidr(target) => value["ip_cidr"] = serde_json::json!([target]),
+            }
+            value
+        }));
+    }
     config
 }
 
@@ -224,7 +255,7 @@ fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyho
     std::thread::spawn(move || {
         let mut input = BufReader::new(reader);
         let mut frame = Vec::new();
-        let read = (&mut input).take(512).read_until(b'\n', &mut frame);
+        let read = (&mut input).take(v2rayr_platform::tun::MAX_REQUEST_BYTES).read_until(b'\n', &mut frame);
         if read.is_err() || frame.last() != Some(&b'\n') {
             return;
         }
@@ -416,6 +447,7 @@ mod tests {
         let request = TunRequest {
             socks_port: 10808,
             upstream: "192.0.2.99".parse().unwrap(),
+            rules: None,
         };
         let config = bridge_config(&request);
         let inbound = &config["inbounds"][0];
@@ -451,6 +483,50 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn scoped_rules() -> Vec<v2rayr_platform::tun::TunRule> {
+        use v2rayr_platform::tun::{TunRule, TunRuleAction, TunRuleTarget};
+        vec![
+            TunRule {
+                applications: vec!["/Applications/Client.app/Contents/MacOS/Client".into()],
+                target: TunRuleTarget::Domain("example.com".into()),
+                action: TunRuleAction::Proxy,
+            },
+            TunRule {
+                applications: vec!["/Applications/Client.app/Contents/MacOS/Client Helper".into()],
+                target: TunRuleTarget::Any,
+                action: TunRuleAction::Block,
+            },
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rule_mode_routes_before_the_socks_bridge_and_defaults_to_direct() {
+        let mut request = TunRequest {
+            socks_port: 10808,
+            upstream: "192.0.2.99".parse().unwrap(),
+            rules: Some(scoped_rules()),
+        };
+        request.validate().unwrap();
+        let config = bridge_config(&request);
+        let route = &config["route"];
+        assert_eq!(route["final"], "direct");
+        assert_eq!(config["inbounds"][0]["udp_mapping"], "address_and_port_dependent");
+        assert_eq!(route["auto_detect_interface"], true);
+        assert_eq!(config["outbounds"][0]["bind_interface"], "lo0");
+        assert_eq!(config["dns"]["servers"][0]["detour"], "bridge");
+        let rules = route["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "hijack-dns");
+        assert_eq!(rules[4]["domain"][0], "example.com");
+        assert_eq!(rules[4]["process_path"][0], "/Applications/Client.app/Contents/MacOS/Client");
+        assert_eq!(rules[4]["outbound"], "bridge");
+        assert_eq!(rules[5]["action"], "reject");
+        assert_ne!(rules[4]["process_path"], rules[5]["process_path"]);
+        request.rules.as_mut().unwrap()[1].applications.clear();
+        assert!(request.validate().is_err());
+    }
+
     #[test]
     #[ignore = "set V2RAYR_TEST_SING_BOX to a real local sing-box executable"]
     fn installed_sing_box_accepts_the_generated_bridge_config() {
@@ -458,23 +534,21 @@ mod tests {
         let request = TunRequest {
             socks_port: 10808,
             upstream: "192.0.2.99".parse().unwrap(),
+            rules: None,
+        };
+        let requests = vec![request];
+        #[cfg(target_os = "macos")]
+        let requests = {
+            let mut rule_request = requests[0].clone();
+            rule_request.rules = Some(scoped_rules());
+            [requests, vec![rule_request]].concat()
         };
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::to_vec(&bridge_config(&request)).unwrap(),
-        )
-        .unwrap();
-        let output = Command::new(core)
-            .args(["check", "-c"])
-            .arg(config)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for request in requests {
+            std::fs::write(&config, serde_json::to_vec(&bridge_config(&request)).unwrap()).unwrap();
+            let output = Command::new(&core).args(["check", "-c"]).arg(&config).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
     }
 }

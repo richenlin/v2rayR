@@ -260,7 +260,7 @@ export function ConnectionPage() {
                 <option value="manual">{t("connection.mode.manual")}</option>
                 {(snapshot.tunAvailable || mode === "tun") ? <option value="tun" disabled={!snapshot.tunAvailable}>{t("connection.mode.tun")}</option> : null}
               </select>
-              {mode === "tun" ? <p className="field-hint">{t("connection.mode.tunHint")}</p> : null}
+              {mode === "tun" ? <p className="field-hint">{t(snapshot.tunRuleRouting ? "connection.mode.tunRuleHint" : "connection.mode.tunHint")}</p> : null}
               {mode === "pac" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
             </div>
             <div>
@@ -273,11 +273,12 @@ export function ConnectionPage() {
                 className="control"
                 style={{ marginTop: 10 }}
                 value={policy}
+                disabled={mode === "tun" && !snapshot.tunRuleRouting}
                 onChange={(event) => void setPolicy(event.target.value as RoutingPolicy)}
               >
-                <option value="rule">{t("connection.policy.rule")}</option>
+                {mode !== "tun" || snapshot.tunRuleRouting ? <option value="rule">{t("connection.policy.rule")}</option> : null}
                 <option value="global">{t("connection.policy.global")}</option>
-                <option value="direct">{t("connection.policy.direct")}</option>
+                {mode !== "tun" ? <option value="direct">{t("connection.policy.direct")}</option> : null}
               </select>
               {snapshot.connection.inboundPort ? (
                 <p className="field-hint mono" style={{ marginTop: 8 }}>

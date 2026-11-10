@@ -17,8 +17,7 @@ use std::sync::atomic::Ordering;
 use chrono::Utc;
 use uuid::Uuid;
 use v2rayr_config::{
-    ApiPlan, CustomRule, DnsPlan, InboundPlan, RoutingMode, RuleAction as ConfigRuleAction,
-    RuleSetKind, RuleSetRef, SessionPlan, emit,
+    ApiPlan, DnsPlan, InboundPlan, RoutingMode, RuleSetKind, RuleSetRef, SessionPlan, emit,
 };
 use v2rayr_domain::{CoreKind, ErrorCode, MuxOptions, MuxProtocol, Profile};
 use v2rayr_engine::{KernelProcess, LaunchSpec, check::rejection, cores::launch_arguments};
@@ -56,6 +55,7 @@ pub(crate) struct SessionRuntime {
     phase: ConnectionPhase,
     mode: TakeoverMode,
     policy: RoutingPolicy,
+    tun_policy: RoutingPolicy,
     profile_id: Option<Uuid>,
     profile_remark: Option<String>,
     core: Option<CoreKind>,
@@ -75,6 +75,7 @@ pub(crate) struct SessionRuntime {
     /// Kept alive for as long as the PAC takeover is active: dropping it stops
     /// the loopback server and the system setting would point at nothing.
     pac: Option<v2rayr_platform::PacServer>,
+    pac_overrides: Vec<v2rayr_platform::PacOverride>,
     tun: Option<v2rayr_platform::tun::TunLease>,
     lan: Option<v2rayr_config::LanInboundPlan>,
     pub total_down: u64,
@@ -88,6 +89,7 @@ impl SessionRuntime {
             phase: ConnectionPhase::Disconnected,
             mode: TakeoverMode::SystemProxy,
             policy: RoutingPolicy::Rule,
+            tun_policy: RoutingPolicy::Global,
             profile_id: None,
             profile_remark: None,
             core: None,
@@ -105,6 +107,7 @@ impl SessionRuntime {
             process: None,
             snapshot: None,
             pac: None,
+            pac_overrides: Vec::new(),
             tun: None,
             lan: None,
             total_down: 0,
@@ -156,11 +159,23 @@ impl SessionRuntime {
         &self.api_secret
     }
 
+    fn policy_for(&self, mode: TakeoverMode) -> RoutingPolicy {
+        if mode == TakeoverMode::Tun { self.tun_policy } else { self.policy }
+    }
+
+    fn select_policy(&mut self, policy: RoutingPolicy) {
+        if self.mode == TakeoverMode::Tun {
+            self.tun_policy = effective_policy(self.mode, policy);
+        } else {
+            self.policy = policy;
+        }
+    }
+
     pub(crate) fn connection_state(&self) -> ConnectionState {
         ConnectionState {
             phase: self.phase,
             mode: self.mode,
-            policy: self.policy,
+            policy: self.policy_for(self.mode),
             profile_id: self.profile_id,
             profile_remark: self.profile_remark.clone(),
             core: self.core,
@@ -227,7 +242,7 @@ impl SessionRuntime {
     }
 }
 
-fn new_secret() -> String {
+pub(crate) fn new_secret() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
@@ -347,11 +362,12 @@ impl App {
         if let (Some(server), Some(port)) =
             (&session.pac, session.http_port.or(session.inbound_port))
         {
-            server.replace_body(v2rayr_platform::render_pac_with_rules(
+            server.replace_body(v2rayr_platform::render_pac_with_overrides(
                 "127.0.0.1",
                 port,
                 &bypass,
                 Some(rules),
+                &session.pac_overrides,
             ));
         }
     }
@@ -423,7 +439,7 @@ impl App {
         Some(ConnectionRequest {
             profile_id: session.profile_id?,
             mode: session.mode,
-            policy: session.policy,
+            policy: session.policy_for(session.mode),
         })
     }
 
@@ -437,7 +453,7 @@ impl App {
             session.profile_id = Some(request.profile_id);
             session.profile_remark = None;
             session.mode = request.mode;
-            session.policy = request.policy;
+            session.select_policy(request.policy);
             session.error = None;
             session.takeover_error = None;
             session.takeover_applied = false;
@@ -458,6 +474,32 @@ impl App {
     }
 
     async fn start_session(&self, request: &ConnectionRequest) -> Result<(), Problem> {
+        let enabled_rules = self.db().enabled_rules().map_err(error::from_store)?;
+        let policy = effective_policy(request.mode, request.policy);
+        if !matches!(request.mode, TakeoverMode::Tun | TakeoverMode::Pac) && policy == RoutingPolicy::Rule
+            && enabled_rules.iter().any(|rule| !rule.applications.is_empty())
+        {
+            return Err(Problem::config(
+                "应用身份接管尚未部署于当前接入方式。请使用 macOS TUN 规则分流，或停用指定应用规则。",
+            ));
+        }
+        let tun_rules = if request.mode == TakeoverMode::Tun && policy == RoutingPolicy::Rule {
+            Some(enabled_rules.iter().map(crate::rules::tun_rule).collect::<Result<Vec<_>, _>>()?)
+        } else {
+            None
+        };
+        let mut rules: Vec<_> = enabled_rules
+            .into_iter()
+            .filter(|row| row.applications.is_empty())
+            .map(crate::rules::into_config_rule)
+            .collect();
+
+        let pac_overrides = if request.mode == TakeoverMode::Pac && policy == RoutingPolicy::Rule {
+            crate::rules::pac_overrides(&mut rules)
+        } else {
+            Vec::new()
+        };
+
         let stored = self.node(request.profile_id).ok_or_else(|| {
             Problem::new(ErrorCode::NotFound.as_str(), false).with_detail("节点不存在".to_owned())
         })?;
@@ -491,8 +533,8 @@ impl App {
             .to_path_buf();
 
         let tun_upstream = if request.mode == TakeoverMode::Tun {
-            if request.policy != RoutingPolicy::Global || core != CoreKind::SingBox {
-                return Err(Problem::config("TUN 当前需要全局分流和 sing-box 节点"));
+            if core != CoreKind::SingBox {
+                return Err(Problem::config("TUN 当前仅支持由 sing-box 运行的节点"));
             }
             let address = profile.address.parse::<std::net::Ipv4Addr>().map_err(|_| {
                 Problem::config(
@@ -520,6 +562,14 @@ impl App {
         } else {
             return Err(port_problem(desired));
         };
+        let tun_request = tun_upstream.map(|upstream| v2rayr_platform::tun::TunRequest {
+            socks_port: inbound_port,
+            upstream,
+            rules: tun_rules,
+        });
+        if let Some(request) = &tun_request {
+            request.validate().map_err(error::from_platform)?;
+        }
         let mut reserved = vec![inbound_port];
         if forward_port != 0 {
             if reserved.contains(&forward_port)
@@ -570,28 +620,13 @@ impl App {
             None
         };
 
-        let rules = self
-            .db()
-            .enabled_rules()
-            .map_err(error::from_store)?
-            .into_iter()
-            .map(|row| CustomRule {
-                kind: crate::config_rule_kind(row.kind),
-                value: row.value,
-                action: match row.action {
-                    v2rayr_store::RuleAction::Proxy => ConfigRuleAction::Proxy,
-                    v2rayr_store::RuleAction::Direct => ConfigRuleAction::Direct,
-                    v2rayr_store::RuleAction::Block => ConfigRuleAction::Block,
-                },
-            })
-            .collect();
-
         // TCP Fast Open on Darwin loopback can break concurrent browser dials.
         let loopback_node = profile.address.eq_ignore_ascii_case("localhost")
             || profile
                 .address
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback());
+        let kernel_policy = if tun_request.is_some() { RoutingPolicy::Global } else { policy };
         let plan = SessionPlan {
             profile,
             core_override,
@@ -617,7 +652,7 @@ impl App {
                 },
             },
             tun: None,
-            policy: match request.policy {
+            policy: match kernel_policy {
                 RoutingPolicy::Rule => RoutingMode::Rule,
                 RoutingPolicy::Global => RoutingMode::Global,
                 RoutingPolicy::Direct => RoutingMode::Direct,
@@ -628,6 +663,7 @@ impl App {
                 fake_ip: settings.routing.fake_ip,
             },
             rules,
+            custom_rules_first: request.mode == TakeoverMode::Pac,
             rule_sets: if settings.routing.rule_set_enabled {
                 self.rule_sets()
             } else {
@@ -746,11 +782,12 @@ impl App {
                     Vec::new()
                 };
                 bypass.extend(settings.bypass_extra());
-                let script = v2rayr_platform::render_pac_with_rules(
+                let script = v2rayr_platform::render_pac_with_overrides(
                     "127.0.0.1",
                     http_port.unwrap_or(inbound_port),
                     &bypass,
                     self.pac_rules().as_deref(),
+                    &pac_overrides,
                 );
                 // PAC port is 10811 unless something already holds it; we never
                 // silently reuse an occupied port, we just pick the next free one
@@ -777,14 +814,18 @@ impl App {
                 }
             }
             TakeoverMode::Tun => {
-                let request = v2rayr_platform::tun::TunRequest {
-                    socks_port: inbound_port,
-                    upstream: tun_upstream.expect("TUN validated above"),
-                };
+                let request = tun_request.expect("TUN validated above");
                 let mut lease = v2rayr_platform::tun::TunLease::start(&request)
                     .await
                     .map_err(error::from_platform)?;
-                let result = v2rayr_engine::latency::verify_tun_route(&self.probe_url).await;
+                // Rule mode can intentionally send the probe direct or block it.
+                // The node was already verified above, and the lease reads back
+                // the macOS capture routes before reporting readiness.
+                let result = if request.rules.is_none() {
+                    v2rayr_engine::latency::verify_tun_route(&self.probe_url).await
+                } else {
+                    Ok(())
+                };
                 if result.is_err() || lease.exited() {
                     if let Err(error) = lease.stop().await {
                         let mut session = self.session.lock().expect("session");
@@ -834,6 +875,7 @@ impl App {
             session.process = Some(process);
             session.snapshot = snapshot;
             session.pac = pac;
+            session.pac_overrides = pac_overrides;
             session.tun = tun;
             session.lan = lan;
             session.total_down = total_down;
@@ -912,6 +954,7 @@ impl App {
             session.traffic_baseline = None;
             session.traffic_connections = 0;
             session.lan = None;
+            session.pac_overrides.clear();
             (session.process.take(), session.pac.take())
         };
         // Stop serving the PAC script only after the OS setting is restored,
@@ -946,7 +989,7 @@ impl App {
         }
         let (mode, policy) = {
             let session = self.session.lock().expect("session");
-            (session.mode, session.policy)
+            (session.mode, session.policy_for(session.mode))
         };
         self.replace_session(ConnectionRequest {
             profile_id,
@@ -963,7 +1006,7 @@ impl App {
             (
                 session.profile_id,
                 session.mode,
-                session.policy,
+                session.policy_for(session.mode),
                 session.phase == ConnectionPhase::Failed
                     && (session.snapshot.is_some() || session.tun.is_some()),
             )
@@ -990,6 +1033,7 @@ impl App {
         if let Some(mut request) = self.active_request() {
             if request.mode != mode {
                 request.mode = mode;
+                request.policy = self.session.lock().expect("session").policy_for(mode);
                 return self.replace_session(request).await;
             }
         } else {
@@ -1001,13 +1045,15 @@ impl App {
 
     pub async fn set_policy(&self, policy: RoutingPolicy) -> Result<AppSnapshot, Problem> {
         let _guard = self.op_lock.lock().await;
+        let mode = self.session.lock().expect("session").mode;
+        let policy = effective_policy(mode, policy);
         if let Some(mut request) = self.active_request() {
             if request.policy != policy {
                 request.policy = policy;
                 return self.replace_session(request).await;
             }
         } else {
-            self.session.lock().expect("session").policy = policy;
+            self.session.lock().expect("session").select_policy(policy);
             self.emit_session();
         }
         self.snapshot()
@@ -1128,9 +1174,70 @@ fn mode_str(mode: TakeoverMode) -> &'static str {
     }
 }
 
+fn effective_policy(mode: TakeoverMode, policy: RoutingPolicy) -> RoutingPolicy {
+    if mode == TakeoverMode::Tun
+        && (!v2rayr_platform::tun::RULE_ROUTING_SUPPORTED || policy != RoutingPolicy::Rule)
+    {
+        RoutingPolicy::Global
+    } else {
+        policy
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tun_exposes_global_without_overwriting_the_selected_policy() {
+        let mut runtime = SessionRuntime::new();
+        runtime.policy = RoutingPolicy::Direct;
+        runtime.mode = TakeoverMode::Tun;
+        assert_eq!(runtime.connection_state().policy, RoutingPolicy::Global);
+        runtime.mode = TakeoverMode::SystemProxy;
+        assert_eq!(runtime.connection_state().policy, RoutingPolicy::Direct);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_remembers_tun_rules_independently_of_non_tun_policy() {
+        let app = crate::test_support::temp_app();
+        app.set_policy(RoutingPolicy::Direct).await.unwrap();
+        let snapshot = app.set_mode(TakeoverMode::Tun).await.unwrap();
+        assert_eq!(snapshot.connection.policy, RoutingPolicy::Global);
+        let snapshot = app.set_policy(RoutingPolicy::Rule).await.unwrap();
+        assert_eq!(snapshot.connection.policy, RoutingPolicy::Rule);
+        let snapshot = app.set_mode(TakeoverMode::Manual).await.unwrap();
+        assert_eq!(snapshot.connection.policy, RoutingPolicy::Direct);
+        let snapshot = app.set_mode(TakeoverMode::Tun).await.unwrap();
+        assert_eq!(snapshot.connection.policy, RoutingPolicy::Rule);
+    }
+
+    #[tokio::test]
+    async fn unavailable_app_capture_cannot_apply_a_scoped_rule_to_all_apps() {
+        let app = crate::test_support::temp_app();
+        let rules = app.add_rule_for_applications(
+            "domain", "example.com", "block",
+            &[v2rayr_domain::RuleApplication {
+                path: "/Applications/Example.app/Contents/MacOS/Example".to_owned(),
+                sha256: "a".repeat(64),
+            }],
+        ).unwrap();
+        let mut request = ConnectionRequest {
+            profile_id: Uuid::new_v4(),
+            mode: TakeoverMode::Manual,
+            policy: RoutingPolicy::Rule,
+        };
+        let blocked = app.start_session(&request).await.unwrap_err();
+        assert!(blocked.detail.unwrap().contains("应用身份接管尚未部署"));
+        request.mode = TakeoverMode::Tun;
+        request.policy = RoutingPolicy::Global;
+        assert_eq!(app.start_session(&request).await.unwrap_err().code, "not_found");
+        request.mode = TakeoverMode::Manual;
+        request.policy = RoutingPolicy::Rule;
+        app.set_rule_enabled(rules[0].id, false).unwrap();
+        assert_eq!(app.start_session(&request).await.unwrap_err().code, "not_found");
+    }
 
     #[test]
     fn a_fresh_runtime_is_disconnected() {

@@ -219,6 +219,7 @@ export interface AppSnapshot {
   version: VersionInfo;
   connection: ConnectionState;
   tunAvailable?: boolean;
+  tunRuleRouting?: boolean;
   settings: SettingsView;
   activeNode?: NodeView;
   nodes: NodeView[];
@@ -264,6 +265,11 @@ export const emptyTraffic: TrafficView = {
   samples: [],
 };
 
+export interface RuleApplication {
+  path: string;
+  sha256: string;
+}
+
 /** One custom routing rule (mirrors `v2rayr_ipc::RuleView`). */
 export interface RuleView {
   id: string;
@@ -272,4 +278,5 @@ export interface RuleView {
   action: "proxy" | "direct" | "block" | string;
   enabled: boolean;
   position: number;
+  applications?: RuleApplication[];
 }

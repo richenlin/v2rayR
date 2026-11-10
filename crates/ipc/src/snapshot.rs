@@ -160,6 +160,8 @@ pub struct AppSnapshot {
     pub connection: ConnectionState,
     #[serde(default)]
     pub tun_available: bool,
+    #[serde(default)]
+    pub tun_rule_routing: bool,
     pub settings: SettingsView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_node: Option<NodeView>,

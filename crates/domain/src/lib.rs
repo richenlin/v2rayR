@@ -36,3 +36,11 @@ pub use subscription::{
 /// requires a migration in `v2rayr-store`; it is intentionally independent from
 /// the application version and from the config-emitter version.
 pub const PROFILE_PAYLOAD_VERSION: u32 = 1;
+
+/// A locally selected executable. Display labels never participate in matching.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuleApplication {
+    pub path: String,
+    pub sha256: String,
+}

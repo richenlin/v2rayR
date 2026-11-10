@@ -346,6 +346,7 @@ mod tests {
             policy: RoutingMode::Rule,
             dns: Default::default(),
             rules: Vec::new(),
+            custom_rules_first: false,
             rule_sets: Vec::new(),
             sniffing: true,
             tcp_fast_open: false,

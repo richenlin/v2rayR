@@ -15,6 +15,14 @@ use crate::{ConfigError, EmittedConfig, Format};
 pub const PROXY_TAG: &str = "proxy";
 
 pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
+    emit_with_ingress(plan, None, None)
+}
+
+pub(crate) fn emit_with_ingress(
+    plan: &SessionPlan,
+    application_inbound: Option<Value>,
+    application_rules: Option<Vec<Value>>,
+) -> Result<EmittedConfig, ConfigError> {
     if choose_core(&plan.profile, Some(CoreKind::SingBox)).is_err() {
         return Err(ConfigError::Unsupported {
             core: "sing-box",
@@ -39,6 +47,7 @@ pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
     if let Some(tun) = &plan.tun {
         inbounds.push(tun_inbound(tun));
     }
+    inbounds.extend(application_inbound);
     root.insert("inbounds".into(), Value::Array(inbounds));
     if let Protocol::WireGuard(wg) = &plan.profile.protocol {
         if wg.local_address.is_empty() {
@@ -77,7 +86,7 @@ pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
     } else {
         root.insert("outbounds".into(), outbounds(plan)?);
     }
-    root.insert("route".into(), route(plan));
+    root.insert("route".into(), route(plan, application_rules));
     root.insert(
         "experimental".into(),
         json!({
@@ -460,7 +469,7 @@ fn transport(transport: &Transport) -> Option<Value> {
     Some(value)
 }
 
-fn route(plan: &SessionPlan) -> Value {
+fn route(plan: &SessionPlan, application_rules: Option<Vec<Value>>) -> Value {
     let final_tag = match plan.policy {
         RoutingMode::Direct => "direct",
         _ => PROXY_TAG,
@@ -475,6 +484,8 @@ fn route(plan: &SessionPlan) -> Value {
     }
 
     if plan.policy == RoutingMode::Rule {
+        let custom = application_rules.unwrap_or_else(|| plan.rules.iter().filter_map(custom_rule).collect());
+        let custom_start = rules.len();
         for rule_set in &plan.rule_sets {
             match rule_set.kind {
                 RuleSetKind::CnSites | RuleSetKind::CnIp => rules.push(json!({
@@ -488,10 +499,10 @@ fn route(plan: &SessionPlan) -> Value {
                 }
             }
         }
-        for rule in &plan.rules {
-            if let Some(value) = custom_rule(rule) {
-                rules.push(value);
-            }
+        if plan.custom_rules_first {
+            rules.splice(custom_start..custom_start, custom);
+        } else {
+            rules.extend(custom);
         }
     }
 
@@ -518,7 +529,7 @@ fn route(plan: &SessionPlan) -> Value {
     Value::Object(route)
 }
 
-fn custom_rule(rule: &crate::plan::CustomRule) -> Option<Value> {
+pub(crate) fn custom_rule(rule: &crate::plan::CustomRule) -> Option<Value> {
     let outbound = match rule.action {
         RuleAction::Proxy => PROXY_TAG,
         RuleAction::Direct => "direct",
@@ -594,6 +605,7 @@ mod tests {
             policy: RoutingMode::Rule,
             dns: Default::default(),
             rules: Vec::new(),
+            custom_rules_first: false,
             rule_sets: Vec::new(),
             sniffing: true,
             tcp_fast_open: true,
@@ -601,6 +613,58 @@ mod tests {
             log_level: "info".into(),
             block_ads: false,
             data_dir: "/tmp/v2rayr".into(),
+        }
+    }
+
+    #[test]
+    fn application_ingress_preserves_first_match_and_isolates_the_mixed_port() {
+        use crate::application_ingress;
+        use crate::CustomRule;
+        use v2rayr_domain::RuleApplication;
+
+        let ports = std::env::var("V2RAYR_APPLICATION_PROBE_PORTS").ok();
+        let ports: Vec<u16> = ports.as_deref().unwrap_or("10808,10809,10812,10813,10814")
+            .split(',').map(|port| port.parse().unwrap()).collect();
+        let mut plan = plan(Profile::new("probe", "127.0.0.1", ports[4], Protocol::Socks {
+            username: None, password: None,
+        }));
+        plan.inbound.port = ports[0];
+        plan.inbound.http_port = Some(ports[1]);
+        plan.api.port = ports[2];
+        plan.sniffing = false;
+        let actions = [RuleAction::Proxy, RuleAction::Block, RuleAction::Direct];
+        plan.rules = actions.into_iter().map(|action| CustomRule {
+            kind: RuleKind::Domain, value: "localhost".into(), action,
+        }).collect();
+        let identity = |path: &str| RuleApplication {
+            path: path.into(), sha256: "a".repeat(64),
+        };
+        let scopes = vec![vec![identity("/one/Client")], vec![identity("/two/Client")], vec![]];
+        let secret = "local-probe-only".repeat(2);
+        let (config, provider) = application_ingress::emit(
+            &plan, &scopes, ports[3], secret, "/usr/bin/sing-box".into(),
+        ).unwrap();
+        let json: Value = serde_json::from_str(&config.body).unwrap();
+        assert!(json["inbounds"][0]["users"].is_null());
+        assert_eq!(json["inbounds"][1]["users"].as_array().unwrap().len(), 3);
+        let rules = json["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[1]["auth_user"], json!(["application-0"]));
+        assert_eq!(rules[1]["inbound"], json!(["application-in"]));
+        assert_eq!(rules[1]["outbound"], "proxy");
+        assert_eq!(rules[2]["auth_user"], json!(["application-1"]));
+        assert_eq!(rules[2]["action"], "reject");
+        assert_eq!(rules[3]["outbound"], "direct");
+        assert!(rules[3]["auth_user"].is_null());
+        plan.policy = RoutingMode::Global;
+        assert!(application_ingress::emit(
+            &plan, &scopes, ports[3], "x".repeat(32), "/usr/bin/sing-box".into(),
+        ).is_err());
+
+        // The native probe supplies a private temp directory and unused ports.
+        if let Some(path) = std::env::var_os("V2RAYR_APPLICATION_PROBE_DIR") {
+            let path = std::path::Path::new(&path);
+            std::fs::write(path.join("kernel.json"), config.body).unwrap();
+            std::fs::write(path.join("provider.json"), serde_json::to_vec(&provider).unwrap()).unwrap();
         }
     }
 

@@ -195,6 +195,8 @@ pub struct RuleView {
     /// `domain` | `domain-suffix` | `ip-cidr` | `process` | `geoip` | `geosite`.
     pub kind: String,
     pub value: String,
+    #[serde(default)]
+    pub applications: Vec<v2rayr_domain::RuleApplication>,
     /// `proxy` | `direct` | `block`.
     pub action: String,
     pub enabled: bool,

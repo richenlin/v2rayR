@@ -39,7 +39,7 @@ pub use subscriptions::{StoredSubscription, SubscriptionUpsert};
 pub use traffic::TrafficSample;
 
 /// Latest schema revision this build knows how to write.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -137,6 +137,9 @@ impl Database {
         if found < 1 {
             tx.execute_batch(MIGRATION_1)?;
         }
+        if found < 2 {
+            tx.execute_batch("ALTER TABLE rules ADD COLUMN applications TEXT NOT NULL DEFAULT '[]';")?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         tracing::info!(from = found, to = SCHEMA_VERSION, "database migrated");
@@ -227,6 +230,24 @@ CREATE TABLE IF NOT EXISTS session_memory (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v1_rules_migrate_to_any_application() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATION_1).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;
+            INSERT INTO rules VALUES ('00000000-0000-0000-0000-000000000001',
+                'domain', 'example.com', 'direct', 1, 0, '2026-01-01T00:00:00Z');").unwrap();
+        drop(conn);
+
+        let db = Database::open(&path).unwrap();
+        let rules = db.list_rules().unwrap();
+        assert_eq!(rules[0].value, "example.com");
+        assert!(rules[0].applications.is_empty());
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+    }
 
     #[test]
     fn fresh_database_is_at_the_current_schema() {

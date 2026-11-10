@@ -1,6 +1,6 @@
 # macOS / Windows TUN 助手
 
-两个平台都沿用同一条链路：普通权限的节点内核提供本机 SOCKS，管理员授权的 helper 只启动固定的 sing-box TUN 网关。GUI 不提权，也不读取或转交管理员密码。节点须使用固定 IPv4、sing-box 和全局分流；避免主内核的节点连接被重新接管。helper 首次配置和启动均只使用固定路径，握手只接受本地端口和节点 IPv4。
+两个平台都沿用同一条链路：普通权限的节点内核提供本机 SOCKS，管理员授权的 helper 只启动固定的 sing-box TUN 网关。GUI 不提权，也不读取或转交管理员密码。节点须使用固定 IPv4 和 sing-box，避免主内核的节点连接被重新接管。Windows 目前使用全局代理。macOS 可用新版 helper 与 sing-box 1.14 或更新版本开启规则分流，未命中默认直连。助手只使用固定路径，握手接受本地端口、节点 IPv4 和有界结构化规则。详见 [应用分流方案](application-routing.md#当前交付路线tun-规则分流)。
 
 ## macOS
 
@@ -57,5 +57,7 @@ if ($LASTEXITCODE) { throw '设置管理员所有者失败' }
 ```sh
 V2RAYR_TUN_ISOLATED_TEST=1 V2RAYR_TEST_TUN_ADDRESS=192.168.77.2 cargo test -p v2rayr-app --test native_tun --locked -- --ignored
 ```
+
+macOS 安装新版 helper 后，可在同一条命令前另加 `V2RAYR_TEST_TUN_RULES=1`，验证测试进程的精确应用规则能通过 TUN 到达该 SOCKS 服务。该用例仅覆盖匹配后的 TCP 代理及正常清理。
 
 Windows 在 PowerShell 中先设置对应的 `$env:V2RAYR_TUN_ISOLATED_TEST` 和 `$env:V2RAYR_TEST_TUN_ADDRESS`，再执行同一条 Cargo 命令。将示例 IP 换成隔离环境中本机实际绑定的私有 IPv4。不要在日常工作机用该用例切换系统网络。
