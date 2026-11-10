@@ -163,7 +163,7 @@ pub fn serve() -> anyhow::Result<()> {
     }
     #[cfg(target_os = "macos")]
     v2rayr_platform::tun::validate_apple_install()?;
-    serve_io(std::io::stdin(), std::io::stdout())
+    serve_io(std::io::stdin(), &mut std::io::stdout())
 }
 
 /// Handles `tun-install` and `tun-pipe` before a GUI or CLI parser starts.
