@@ -34,15 +34,13 @@ pnpm build          # 类型检查 + 产物到 ui/dist
 `apps/desktop` 不在根 workspace 里，单独构建：
 
 ```bash
-cargo install tauri-cli --version "^2"
-pnpm --dir ui install
-pnpm --dir ui build        # 产出 ui/dist（最后一步会把 JS/CSS 内联进 index.html）
-cd apps/desktop
-cargo tauri build          # 产出 .app 与 .dmg
+bash scripts/package-desktop.sh
+# 当前平台的安装包和 SHA256SUMS 在仓库根目录 dist/
+# 只编译时：bash scripts/package-desktop.sh --no-bundle
 ```
 
-前端要**先手动构建**：`tauri.conf.json` 里没有 `beforeBuildCommand`，因为 tauri-cli 执行该命令时的工作目录
-不确定，`../../ui` 会被解析到仓库外。打包前跑一次 `pnpm --dir ui build` 即可。
+脚本自己构建前端。`tauri.conf.json` 里没有 `beforeBuildCommand`，因为 tauri-cli 执行该命令时的工作目录
+不确定，`../../ui` 会被解析到仓库外。合并到 `main` 时，CI 用同一脚本在 macOS、Windows、Linux 上打包。
 
 `pnpm build` 的最后一步是 `node scripts/inline.mjs`：把 `assets/*.js` 与 `assets/*.css` 内联进
 `index.html`。原因有两个，都来自打包后 WebView 的实际行为：

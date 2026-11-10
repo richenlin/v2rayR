@@ -18,15 +18,11 @@ Tauri 2 外壳。这里刻意只做三件事：
 
 ```bash
 cd ../..                      # 回到仓库根
-pnpm --dir ui install
-pnpm --dir ui build           # 或者用 cargo tauri dev 让它自己起
-bash scripts/stage-desktop-cores.sh  # 准备校验过的本机架构内核
-cd apps/desktop
-cargo tauri dev
-cargo tauri build             # .app / .dmg
+bash scripts/package-desktop.sh      # 安装包与 SHA256SUMS 写到仓库根目录 dist/
+cd apps/desktop && ../../ui/node_modules/.bin/tauri dev
 ```
 
-需要 `cargo install tauri-cli --version "^2"`。
+打包脚本会安装 UI 依赖、构建并内联前端、校验并准备本机架构的内核，然后调用仓库锁定的 Tauri CLI。只编译、不打安装包时用 `bash scripts/package-desktop.sh --no-bundle`。
 
 发行包内置 sing-box 和 Xray，内核与应用一同升级。准备脚本须在目标平台运行；它使用仓库固定的版本及 SHA-256，缺少内核、许可文件或 Xray 地理数据时会失败。
 
@@ -34,4 +30,5 @@ cargo tauri build             # .app / .dmg
 
 - 托盘菜单只暴露了配置项，图标与菜单项尚未接上。
 - 「一键安装特权 helper」的引导流程未实现，TUN 会直接返回 `permission_denied` 并给出替代方案。
-- 打包签名/公证需要 Apple 开发者证书，CI 里的 desktop job 只做 `--no-bundle` 的编译验证。
+- 合并到 `main` 后，CI 在 macOS、Windows、Linux 上分别打包，产物在该任务的 `dist/`，并作为构建产物上传。签名和公证仍由手动的 Signed release candidates 工作流完成。
+- 拉取请求只编译桌面壳，不产出安装包。

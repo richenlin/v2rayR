@@ -27,3 +27,5 @@ screenshots/
 
 # local build artifacts staged for testing
 /release
+# Desktop installers from scripts/package-desktop.sh
+/dist

@@ -86,11 +86,8 @@ V2RAYR_HOME=/tmp/v2rayr ./target/debug/v2rayr status
 # 3. 界面（离线预览：mock 后端，不写本机配置）
 cd ui && pnpm install && pnpm dev     # http://localhost:1420
 
-# 4. 桌面壳（需要 tauri-cli 与完整工具链）
-cargo install tauri-cli --version "^2"
-pnpm --dir ui build                 # 先把 UI 打包并内联成单文件
-bash scripts/stage-desktop-cores.sh # 下载、校验并准备当前平台的内置内核
-cd apps/desktop && cargo tauri build   # 产出 .app 与 .dmg
+# 4. 桌面安装包（当前平台；产物在仓库根目录 dist/）
+bash scripts/package-desktop.sh
 ```
 
 CLI 常用命令：`status`、`nodes`、`import <file|->`、`sub add/update/list`、`connect/disconnect/run`、`test`、
