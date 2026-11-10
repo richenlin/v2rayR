@@ -543,7 +543,16 @@ impl App {
         Ok(AppSnapshot {
             version: self.version_info(),
             connection,
-            tun_available: v2rayr_platform::tun::provisioned(),
+            tun_available: {
+                #[cfg(windows)]
+                {
+                    true
+                }
+                #[cfg(not(windows))]
+                {
+                    v2rayr_platform::tun::provisioned()
+                }
+            },
             settings: settings.view(self.settings_revision.load(Ordering::Relaxed)),
             active_node,
             nodes,

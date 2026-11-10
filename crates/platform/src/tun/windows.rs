@@ -27,7 +27,8 @@ use windows_sys::Win32::{
         },
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
         Threading::{
-            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, GetProcessId, WaitForSingleObject,
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, GetExitCodeProcess, GetProcessId,
+            WaitForSingleObject,
         },
     },
     UI::{
@@ -213,10 +214,168 @@ fn server(nonce: &str) -> io::Result<NamedPipeServer> {
 
 fn elevate(nonce: &str) -> io::Result<OwnedHandle> {
     validate_install()?;
+    shell_execute(
+        std::path::Path::new(HELPER),
+        &format!("tun-pipe {nonce} {}", std::process::id()),
+        std::path::Path::new(ROOT),
+    )
+}
+
+/// Installs the protected TUN directory by elevating a staged helper.
+///
+/// `helper` must be a regular `v2rayr-helper.exe` sitting beside `sing-box.exe`
+/// and `wintun.dll`. The elevated process copies that trio into Program Files.
+pub async fn elevate_install(helper: &std::path::Path) -> Result<(), PlatformError> {
+    let helper = helper.to_path_buf();
+    let report = helper.with_file_name("install-error.txt");
+    let _ = std::fs::remove_file(&report);
+    let helper_for_wait = helper.clone();
+    let started = tokio::task::spawn_blocking(move || {
+        let directory = helper_for_wait
+            .parent()
+            .ok_or_else(|| io::Error::other("无法定位 Windows TUN 安装目录"))?;
+        shell_execute(&helper_for_wait, "tun-install", directory)
+    })
+    .await
+    .map_err(io::Error::other)?;
+    let process = match started {
+        Ok(process) => process,
+        Err(error) if error.raw_os_error() == Some(1223) => {
+            return Err(PlatformError::PermissionDenied(
+                "已取消 Windows TUN 管理员授权".into(),
+            ));
+        }
+        Err(error) => {
+            return Err(PlatformError::PermissionDenied(format!(
+                "无法启动 Windows TUN 安装：{error}"
+            )));
+        }
+    };
+    let exit = tokio::task::spawn_blocking(move || wait_exit(&process))
+        .await
+        .map_err(io::Error::other)?
+        .map_err(PlatformError::Io)?;
+    if exit == 0 && provisioned() && validate_install().is_ok() {
+        return Ok(());
+    }
+    let detail = std::fs::read_to_string(&report)
+        .unwrap_or_else(|_| format!("安装程序退出码 {exit}，没有留下原因"));
+    Err(PlatformError::PermissionDenied(format!(
+        "安装 Windows TUN 组件失败：{}",
+        detail.trim()
+    )))
+}
+
+fn wait_exit(process: &OwnedHandle) -> io::Result<u32> {
+    // SAFETY: the handle is owned and the exit code points at writable storage.
+    let waited = unsafe { WaitForSingleObject(process.as_raw_handle(), 120_000) };
+    if waited != 0 {
+        return Err(io::Error::other("Windows TUN 安装未在两分钟内结束"));
+    }
+    let mut code = 1;
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(code)
+}
+
+pub fn bundle_files(
+    dir: &std::path::Path,
+) -> io::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+    let helper = dir.join("v2rayr-helper.exe");
+    let core = dir.join("sing-box.exe");
+    let dll = dir.join("wintun.dll");
+    for path in [&helper, &core, &dll] {
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+            invalid("Windows TUN 安装目录缺少 v2rayr-helper.exe、sing-box.exe 或 wintun.dll")
+        })?;
+        if metadata.file_attributes() & 0x400 != 0 || !metadata.is_file() {
+            return Err(invalid("Windows TUN 安装文件不能是符号链接或目录联接"));
+        }
+    }
+    Ok((helper, core, dll))
+}
+
+/// Copies the staged helper, sing-box and Wintun into the administrator directory.
+///
+/// Must run elevated. The source is the directory of this process, never a path
+/// supplied by the unelevated caller.
+pub fn install_protected_bundle() -> io::Result<()> {
+    if !is_admin() {
+        return Err(invalid("安装 Windows TUN 需要管理员权限"));
+    }
+    let exe = std::env::current_exe()?;
+    let Some(source) = exe.parent() else {
+        return Err(invalid("无法定位 Windows TUN 安装源"));
+    };
+    if source == std::path::Path::new(ROOT) {
+        return validate_install();
+    }
+    let (helper, core, dll) = bundle_files(source)?;
+    if std::path::Path::new(ROOT).exists() {
+        return Err(invalid(
+            "C:\\Program Files\\v2rayR-TUN 已存在但未通过校验，请由管理员检查后删除再重试",
+        ));
+    }
+    let result = (|| {
+        std::fs::create_dir(ROOT)?;
+        icacls(&[
+            ROOT,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "*S-1-5-32-545:(OI)(CI)RX",
+        ])?;
+        std::fs::create_dir(RUNTIME)?;
+        std::fs::copy(&helper, HELPER)?;
+        std::fs::copy(&core, BRIDGE_CORE)?;
+        std::fs::copy(&dll, DLL)?;
+        icacls(&[ROOT, "/setowner", "*S-1-5-32-544", "/T"])?;
+        validate_install()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(ROOT);
+    }
+    result
+}
+
+fn icacls(args: &[&str]) -> io::Result<()> {
+    let output = Command::new(r"C:\Windows\System32\icacls.exe")
+        .args(args)
+        .env_clear()
+        .env("SystemRoot", r"C:\Windows")
+        .env("WINDIR", r"C:\Windows")
+        .env("PATH", r"C:\Windows\System32")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = if detail.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout)
+        } else {
+            detail
+        };
+        Err(io::Error::other(format!(
+            "设置 TUN 目录权限失败：{}",
+            detail.trim()
+        )))
+    }
+}
+
+fn shell_execute(
+    exe: &std::path::Path,
+    parameters: &str,
+    directory: &std::path::Path,
+) -> io::Result<OwnedHandle> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide_os = |value: &std::ffi::OsStr| value.encode_wide().chain([0]).collect::<Vec<_>>();
     let verb = wide("runas");
-    let exe = wide(HELPER);
-    let args = wide(&format!("tun-pipe {nonce} {}", std::process::id()));
-    let directory = wide(ROOT);
+    let exe = wide_os(exe.as_os_str());
+    let args = wide(parameters);
+    let directory = wide_os(directory.as_os_str());
     // SAFETY: initialized for this blocking worker only; all strings and the
     // structure are live until the synchronous ShellExecuteEx call returns.
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
@@ -284,12 +443,18 @@ impl Lease {
         use tokio::io::AsyncReadExt;
         tokio::time::timeout(
             Duration::from_secs(30),
-            (&mut reader).take(256).read_line(&mut ready),
+            (&mut reader).take(2048).read_line(&mut ready),
         )
         .await
         .map_err(|_| invalid("Windows TUN helper readiness timed out"))??;
         if ready != "ready\n" {
-            return Err(invalid("Windows TUN helper did not verify routes").into());
+            let detail = ready.trim();
+            let detail = if detail.is_empty() {
+                "Windows TUN helper 没有确认网卡和路由"
+            } else {
+                detail
+            };
+            return Err(invalid(detail).into());
         }
         Ok(Self {
             pipe: Some(reader.into_inner()),
@@ -370,4 +535,22 @@ pub fn prepare_core(command: &mut Command) -> io::Result<()> {
 pub fn request_core_stop(child: &Child) {
     // SAFETY: caller owns the child started in its own process group.
     unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bundle_files;
+
+    #[test]
+    fn bundle_requires_the_three_regular_files() {
+        let dir = tempfile::tempdir().expect("temp");
+        std::fs::write(dir.path().join("v2rayr-helper.exe"), b"helper").unwrap();
+        std::fs::write(dir.path().join("sing-box.exe"), b"core").unwrap();
+        assert!(bundle_files(dir.path()).is_err());
+        std::fs::write(dir.path().join("wintun.dll"), b"dll").unwrap();
+        let (helper, core, dll) = bundle_files(dir.path()).expect("bundle");
+        assert_eq!(helper.file_name().unwrap(), "v2rayr-helper.exe");
+        assert_eq!(core.file_name().unwrap(), "sing-box.exe");
+        assert_eq!(dll.file_name().unwrap(), "wintun.dll");
+    }
 }

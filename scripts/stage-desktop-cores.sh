@@ -42,5 +42,8 @@ done
 for file in geoip.dat geosite.dat; do
   cp "$work/xray/data/cores/$file" "$stage/xray-assets/"
 done
+if [[ "$triple" == *-pc-windows-msvc ]]; then
+  cp "$work/sing-box/data/cores/wintun.dll" "$stage/wintun.dll"
+fi
 rm -rf -- apps/desktop/embedded-cores
 mv "$stage" apps/desktop/embedded-cores

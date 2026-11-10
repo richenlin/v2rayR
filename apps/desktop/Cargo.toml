@@ -34,6 +34,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 v2rayr-app = { path = "../../crates/app" }
+v2rayr-helper = { path = "../../crates/helper" }
 v2rayr-domain = { path = "../../crates/domain" }
 v2rayr-ipc = { path = "../../crates/ipc" }
 v2rayr-platform = { path = "../../crates/platform" }

@@ -117,6 +117,37 @@ impl SessionRuntime {
         self.phase
     }
 
+    /// HTTP proxy port of the running kernel.
+    ///
+    /// Xray serves HTTP on `http_port` and SOCKS on `inbound_port`. mihomo and
+    /// sing-box accept HTTP on the mixed `inbound_port`. Downloads must use the
+    /// HTTP port: this process does not honor the WinINet/PAC setting it writes.
+    pub(crate) fn local_http_proxy(&self) -> LocalHttpProxy {
+        if self.phase != ConnectionPhase::Connected {
+            return LocalHttpProxy::NotConnected;
+        }
+        if self.policy == RoutingPolicy::Direct {
+            return LocalHttpProxy::Direct;
+        }
+        match self.http_port.or(self.inbound_port) {
+            Some(port) => LocalHttpProxy::Ready(port),
+            None => LocalHttpProxy::MissingPort,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_download_proxy_for_test(
+        &mut self,
+        http_port: Option<u16>,
+        inbound_port: Option<u16>,
+        policy: RoutingPolicy,
+    ) {
+        self.phase = ConnectionPhase::Connected;
+        self.http_port = http_port;
+        self.inbound_port = inbound_port;
+        self.policy = policy;
+    }
+
     pub(crate) fn api_port(&self) -> Option<u16> {
         self.api_port
     }
@@ -198,6 +229,109 @@ impl SessionRuntime {
 
 fn new_secret() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(windows)]
+async fn ensure_windows_tun(app: &App) -> Result<(), Problem> {
+    if v2rayr_platform::tun::provisioned() {
+        return Ok(());
+    }
+    let sing = app
+        .cores
+        .read()
+        .expect("cores")
+        .path(v2rayr_domain::CoreKind::SingBox)
+        .ok_or_else(|| Problem::config("Windows TUN 需要已安装的 sing-box"))?
+        .to_path_buf();
+    let dll = find_wintun(&sing).ok_or_else(|| {
+        Problem::config(
+            "Windows TUN 需要与 sing-box 放在一起的 wintun.dll。请重新安装 sing-box 内核",
+        )
+    })?;
+    let stage = app.paths().runtime_dir().join("tun-bundle");
+    let helper = tokio::task::spawn_blocking(move || stage_windows_tun(&stage, &sing, &dll))
+        .await
+        .map_err(|error| crate::error::internal(error.to_string()))?
+        .map_err(Problem::config)?;
+    v2rayr_platform::tun::windows::elevate_install(&helper)
+        .await
+        .map_err(crate::error::from_platform)
+}
+
+#[cfg(windows)]
+fn find_wintun(sing: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut candidates = vec![sing.with_file_name("wintun.dll")];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("wintun.dll"));
+        candidates.push(dir.join("resources").join("wintun.dll"));
+    }
+    candidates.into_iter().find(|path| is_regular_file(path))
+}
+
+#[cfg(windows)]
+fn stage_windows_tun(
+    stage: &std::path::Path,
+    sing: &std::path::Path,
+    dll: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    if let Ok(metadata) = std::fs::symlink_metadata(stage) {
+        if !is_real_directory(&metadata) {
+            return Err("TUN 安装暂存目录不是普通文件夹".to_owned());
+        }
+        std::fs::remove_dir_all(stage)
+            .map_err(|error| format!("无法清理 TUN 安装暂存目录：{error}"))?;
+    }
+    std::fs::create_dir_all(stage)
+        .map_err(|error| format!("无法创建 TUN 安装暂存目录：{error}"))?;
+    let exe = std::env::current_exe().map_err(|error| format!("无法定位当前程序：{error}"))?;
+    copy_regular_file(&exe, &stage.join("v2rayr-helper.exe"))?;
+    copy_regular_file(sing, &stage.join("sing-box.exe"))?;
+    copy_regular_file(dll, &stage.join("wintun.dll"))?;
+    Ok(stage.join("v2rayr-helper.exe"))
+}
+
+#[cfg(windows)]
+fn copy_regular_file(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    if !is_regular_file(source) {
+        return Err(format!("TUN 组件不是普通文件：{}", source.display()));
+    }
+    std::fs::copy(source, target).map_err(|error| {
+        format!(
+            "无法复制 {}：{error}",
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("TUN 组件")
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        use std::os::windows::fs::MetadataExt;
+        metadata.is_file() && metadata.file_attributes() & 0x400 == 0
+    })
+}
+
+#[cfg(windows)]
+fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.is_dir() && metadata.file_attributes() & 0x400 == 0
+}
+
+/// Whether an app-originated download can be sent through the running kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalHttpProxy {
+    Ready(u16),
+    NotConnected,
+    /// The kernel is up, but its final outbound is direct, so the download
+    /// would leave the machine without using the selected node.
+    Direct,
+    MissingPort,
 }
 
 impl App {
@@ -357,10 +491,6 @@ impl App {
             .to_path_buf();
 
         let tun_upstream = if request.mode == TakeoverMode::Tun {
-            if !v2rayr_platform::tun::provisioned() {
-                return Err(Problem::new(ErrorCode::PermissionDenied.as_str(), false)
-                    .with_detail("当前平台尚未部署 TUN helper；请改用系统代理或本地端口"));
-            }
             if request.policy != RoutingPolicy::Global || core != CoreKind::SingBox {
                 return Err(Problem::config("TUN 当前需要全局分流和 sing-box 节点"));
             }
@@ -369,6 +499,12 @@ impl App {
                     "TUN 当前仅接受使用固定 IPv4 的节点，避免节点域名变更后形成路由回环",
                 )
             })?;
+            #[cfg(windows)]
+            ensure_windows_tun(self).await?;
+            if !v2rayr_platform::tun::provisioned() {
+                return Err(Problem::new(ErrorCode::PermissionDenied.as_str(), false)
+                    .with_detail("当前平台尚未部署 TUN helper；请改用系统代理或本地端口"));
+            }
             Some(address)
         } else {
             None

@@ -13,6 +13,7 @@
 pub mod authorize;
 pub mod ops;
 pub mod protocol;
+pub mod tun;
 
 pub use authorize::{Token, TokenError};
 pub use ops::{HelperError, execute};

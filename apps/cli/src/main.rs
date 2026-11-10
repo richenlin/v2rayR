@@ -154,6 +154,9 @@ enum SubCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if v2rayr_helper::tun::handle_process_entry() {
+        return Ok(());
+    }
     let cli = Cli::parse();
     let paths = match &cli.home {
         Some(root) => AppPaths::new(root.clone()),

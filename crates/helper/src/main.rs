@@ -3,9 +3,6 @@
 //! Linux TUN has a separate administrator-authorized pipe lease. Legacy
 //! unprivileged operations retain their JSON request/response format.
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
-mod tun;
-
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -81,16 +78,19 @@ enum AutostartAction {
 }
 
 fn main() -> anyhow::Result<()> {
+    if v2rayr_helper::tun::handle_process_entry() {
+        return Ok(());
+    }
     let cli = Cli::parse();
     if matches!(cli.command, Command::TunStdio) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        return tun::serve();
+        return v2rayr_helper::tun::serve();
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         bail!("TUN helper is not available on this platform");
     }
     #[cfg(windows)]
     if let Command::TunPipe { ref nonce, caller } = cli.command {
-        return tun::serve_windows(nonce, caller);
+        return v2rayr_helper::tun::serve_windows(nonce, caller);
     }
     #[cfg(windows)]
     if v2rayr_platform::tun::windows::is_admin() {

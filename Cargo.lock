@@ -1521,6 +1521,7 @@ dependencies = [
  "v2rayr-config",
  "v2rayr-domain",
  "v2rayr-engine",
+ "v2rayr-helper",
  "v2rayr-ipc",
  "v2rayr-platform",
  "v2rayr-store",

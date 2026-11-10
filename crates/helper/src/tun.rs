@@ -135,13 +135,63 @@ pub fn serve() -> anyhow::Result<()> {
     serve_io(std::io::stdin(), std::io::stdout())
 }
 
+/// Handles `tun-install` and `tun-pipe` before a GUI or CLI parser starts.
+///
+/// The desktop executable is copied into the protected TUN directory and then
+/// elevated, so this process image has to recognize those two commands.
+pub fn handle_process_entry() -> bool {
+    #[cfg(not(windows))]
+    {
+        false
+    }
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        match (args.first().map(String::as_str), args.len()) {
+            (Some("tun-install"), 1) => {
+                if let Err(error) = v2rayr_platform::tun::windows::install_protected_bundle() {
+                    write_install_error(&error);
+                    std::process::exit(1);
+                }
+                true
+            }
+            (Some("tun-pipe"), 3) => {
+                let caller = args[2].parse().unwrap_or(0);
+                if let Err(error) = serve_windows(&args[1], caller) {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn write_install_error(error: &std::io::Error) {
+    let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("install-error.txt")))
+    else {
+        return;
+    };
+    let _ = std::fs::write(path, error.to_string());
+}
+
 #[cfg(windows)]
 pub fn serve_windows(nonce: &str, caller: u32) -> anyhow::Result<()> {
     let pipe = v2rayr_platform::tun::windows::open_for_helper(nonce, caller)?;
-    serve_io(pipe.try_clone()?, pipe)
+    let mut writer = pipe.try_clone()?;
+    let result = serve_io(pipe, &mut writer);
+    if let Err(error) = &result {
+        let _ = writer.write_all(format!("error: {error:#}\n").as_bytes());
+        let _ = writer.flush();
+    }
+    result
 }
 
-fn serve_io(reader: impl Read + Send + 'static, mut writer: impl Write) -> anyhow::Result<()> {
+fn serve_io(reader: impl Read + Send + 'static, writer: &mut dyn Write) -> anyhow::Result<()> {
     #[cfg(unix)]
     trusted_executable(BRIDGE_CORE.as_ref())
         .context("validating administrator-installed TUN core")?;
@@ -205,10 +255,25 @@ fn serve_io(reader: impl Read + Send + 'static, mut writer: impl Write) -> anyho
             .arg("-D")
             .arg(directory.path())
             .env_clear()
-            .current_dir(directory.path())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::null());
+        #[cfg(windows)]
+        {
+            // A cleared environment without SystemRoot prevents the Windows
+            // loader and Wintun from initializing.
+            command
+                .env("SystemRoot", r"C:\Windows")
+                .env("WINDIR", r"C:\Windows")
+                .env("PATH", r"C:\Windows\System32")
+                .current_dir(r"C:\Program Files\v2rayR-TUN");
+        }
+        #[cfg(not(windows))]
+        command.current_dir(directory.path());
+        if let Ok(log) = std::fs::File::create(directory.path().join(format!("{action}.log"))) {
+            command.stderr(Stdio::from(log));
+        } else {
+            command.stderr(Stdio::null());
+        }
         #[cfg(target_os = "linux")]
         {
             // SAFETY: getpid/prctl/getppid are async-signal-safe in the pre-exec
@@ -232,7 +297,10 @@ fn serve_io(reader: impl Read + Send + 'static, mut writer: impl Write) -> anyho
     loop {
         if let Some(status) = check.0.try_wait()? {
             if !status.success() {
-                bail!("bridge core rejected configuration")
+                bail!(
+                    "bridge core rejected configuration: {}",
+                    log_tail(&directory.path().join("check.log"))
+                )
             }
             break;
         }
@@ -245,7 +313,10 @@ fn serve_io(reader: impl Read + Send + 'static, mut writer: impl Write) -> anyho
     let deadline = Instant::now() + Duration::from_secs(10);
     let owned_interface = loop {
         if bridge.0.try_wait()?.is_some() {
-            bail!("bridge core exited before TUN was ready")
+            bail!(
+                "bridge core exited before TUN was ready: {}",
+                log_tail(&directory.path().join("run.log"))
+            )
         }
         if lease_ended(&eof) || Instant::now() >= deadline {
             bail!("TUN startup interrupted")
@@ -276,6 +347,18 @@ fn serve_io(reader: impl Read + Send + 'static, mut writer: impl Write) -> anyho
         std::thread::sleep(Duration::from_millis(40));
     }
     Ok(())
+}
+
+fn log_tail(path: &std::path::Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<&str> = text.lines().rev().take(4).collect();
+    lines.reverse();
+    let joined = lines.join(" | ");
+    if joined.is_empty() {
+        "no core output".to_owned()
+    } else {
+        joined
+    }
 }
 
 fn lease_ended(eof: &std::sync::mpsc::Receiver<()>) -> bool {
