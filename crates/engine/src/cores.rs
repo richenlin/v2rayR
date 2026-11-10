@@ -128,6 +128,8 @@ pub async fn probe(kind: CoreKind, program: &Path) -> Result<CoreProbe, EngineEr
                 command.arg("version");
             }
         }
+        #[cfg(windows)]
+        crate::process::hide_console(&mut command);
         command.output()
     });
     let output = tokio::time::timeout(Duration::from_secs(5), task)
@@ -191,7 +193,13 @@ pub fn launch_arguments(kind: CoreKind, config: &Path, data_dir: &Path) -> Vec<S
 
 pub async fn version_line(path: &Path) -> Option<String> {
     let path = path.to_path_buf();
-    let task = tokio::task::spawn_blocking(move || Command::new(&path).arg("version").output());
+    let task = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(&path);
+        command.arg("version");
+        #[cfg(windows)]
+        crate::process::hide_console(&mut command);
+        command.output()
+    });
     let output = tokio::time::timeout(Duration::from_secs(3), task)
         .await
         .ok()?

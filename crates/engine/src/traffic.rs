@@ -32,10 +32,7 @@ pub async fn xray_totals(program: &Path, port: u16) -> Result<Counters, EngineEr
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
+        crate::process::hide_console(&mut command);
         let mut child = command.spawn()?;
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {

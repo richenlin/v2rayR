@@ -78,6 +78,10 @@ impl KernelProcess {
         for (key, value) in &spec.env {
             command.env(key, value);
         }
+        // Xray and sing-box are console programs. A GUI parent otherwise gets a
+        // console that stays open for the whole session; closing it kills the core.
+        #[cfg(windows)]
+        hide_console(&mut command);
         let child = command.spawn().map_err(|error| EngineError::Spawn {
             core: spec.core.as_str(),
             message: error.to_string(),
@@ -213,6 +217,13 @@ impl KernelProcess {
     }
 }
 
+/// `CREATE_NO_WINDOW`. The child already has its standard streams redirected.
+#[cfg(windows)]
+pub(crate) fn hide_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000);
+}
+
 impl Drop for KernelProcess {
     fn drop(&mut self) {
         // Covers launch/probe cancellation and error paths before the child
@@ -279,5 +290,59 @@ mod tests {
         assert!(process.is_alive());
         process.stop(Duration::from_secs(2)).await.expect("stop");
         assert!(!process.is_alive());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_console_program_is_started_without_a_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("console.ps1");
+        let marker = dir.path().join("hwnd.txt");
+        std::fs::write(
+            &script,
+            r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class ConsoleWindow {
+  [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+}
+"@
+$handle = [ConsoleWindow]::GetConsoleWindow()
+Set-Content -Path $env:V2RAYR_CONSOLE_HWND -Value $handle.ToInt64() -NoNewline
+Start-Sleep -Seconds 30
+"#,
+        )
+        .expect("script");
+        let spec = LaunchSpec::new(
+            CoreKind::Xray,
+            "powershell.exe",
+            vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script.display().to_string(),
+            ],
+            dir.path().join("powershell.log"),
+        )
+        .with_env("V2RAYR_CONSOLE_HWND", marker.display().to_string());
+        let mut process = KernelProcess::launch(&spec).await.expect("launch");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let hwnd = loop {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                break text.trim().to_owned();
+            }
+            if !process.is_alive() || Instant::now() >= deadline {
+                let log = std::fs::read_to_string(process.log_path()).unwrap_or_default();
+                panic!("powershell did not report its console handle: {log}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        process
+            .stop(Duration::from_millis(200))
+            .await
+            .expect("stop");
+        assert_eq!(hwnd, "0", "kernel spawn allocated console hwnd {hwnd}");
     }
 }

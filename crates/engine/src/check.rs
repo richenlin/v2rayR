@@ -58,6 +58,8 @@ pub async fn check_config_with_assets(
             }
         }
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        crate::process::hide_console(&mut command);
         command.output()
     });
     let output = tokio::time::timeout(Duration::from_secs(20), task)
