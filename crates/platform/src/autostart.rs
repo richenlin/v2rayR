@@ -200,9 +200,11 @@ impl Autostart for DesktopEntryAutostart {
                 Err(error) => Err(error.into()),
             };
         }
+        // A desktop entry is a Linux file. POSIX absolute paths start with `/`;
+        // `Path::is_absolute` follows the host and rejects this form on Windows.
         let path = program
             .to_str()
-            .filter(|_| program.is_absolute())
+            .filter(|path| path.starts_with('/'))
             .ok_or_else(|| PlatformError::InvalidState("登录项需要有效的绝对路径".into()))?;
         if path.chars().any(char::is_control) {
             return Err(PlatformError::InvalidState("登录项路径包含控制字符".into()));
