@@ -141,7 +141,7 @@ export function ConnectionPage() {
   const nodes = snapshot?.nodes ?? [];
   const connection = snapshot?.connection;
   const phase = connection?.phase ?? "disconnected";
-  const mode = connection?.mode ?? "system-proxy";
+  const mode = connection?.mode === "pac" ? "system-proxy" : connection?.mode ?? "system-proxy";
   const policy = connection?.policy ?? "rule";
 
   const candidates = useMemo(() => {
@@ -201,10 +201,6 @@ export function ConnectionPage() {
 
   return (
     <div className="page">
-      <div className="eyebrow">{t("connection.eyebrow")}</div>
-      <h1 className="page-title">{t("connection.title")}</h1>
-      <p className="page-sub">{t("connection.subtitle")}</p>
-
       <div className="hero-grid">
         <section className="status-card" aria-live="polite">
           <Motif />
@@ -264,12 +260,11 @@ export function ConnectionPage() {
                 onChange={(event) => void setMode(event.target.value as TakeoverMode)}
               >
                 <option value="system-proxy">{t("connection.mode.system")}</option>
-                <option value="pac">{t("connection.mode.pac")}</option>
                 <option value="manual">{t("connection.mode.manual")}</option>
                 {(snapshot.tunAvailable || mode === "tun") ? <option value="tun" disabled={!snapshot.tunAvailable}>{t("connection.mode.tun")}</option> : null}
               </select>
               {mode === "tun" ? <p className="field-hint">{t(snapshot.tunRuleRouting ? "connection.mode.tunRuleHint" : "connection.mode.tunHint")}</p> : null}
-              {mode === "pac" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
+              {mode === "system-proxy" && policy === "rule" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
             </div>
             <div>
               <label className="field-label" htmlFor="routing-policy">

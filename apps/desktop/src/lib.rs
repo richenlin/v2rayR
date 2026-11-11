@@ -583,7 +583,7 @@ pub fn run() {
                         .remembered_mode()
                         .as_deref()
                         .map(|mode| match mode {
-                            "pac" => v2rayr_ipc::TakeoverMode::Pac,
+                            "pac" => v2rayr_ipc::TakeoverMode::SystemProxy,
                             "tun" => v2rayr_ipc::TakeoverMode::Tun,
                             "manual" => v2rayr_ipc::TakeoverMode::Manual,
                             _ => v2rayr_ipc::TakeoverMode::SystemProxy,
@@ -779,7 +779,7 @@ fn install_tray(handle: &AppHandle) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move {
                     let stored = app.remembered_mode().unwrap_or_default();
                     let mode = match stored.as_str() {
-                        "pac" => v2rayr_ipc::TakeoverMode::Pac,
+                        "pac" => v2rayr_ipc::TakeoverMode::SystemProxy,
                         "tun" => v2rayr_ipc::TakeoverMode::Tun,
                         "manual" => v2rayr_ipc::TakeoverMode::Manual,
                         _ => v2rayr_ipc::TakeoverMode::SystemProxy,

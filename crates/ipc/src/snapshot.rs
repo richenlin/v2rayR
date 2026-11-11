@@ -25,9 +25,9 @@ pub enum ConnectionPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TakeoverMode {
-    /// macOS/Windows system proxy pointing at the mixed inbound.
+    /// OS proxy: PAC in Rule mode, fixed proxy for Global/Direct.
     SystemProxy,
-    /// Automatic proxy configuration (PAC) served over loopback.
+    /// Legacy wire value, normalized to SystemProxy by the application.
     Pac,
     /// Virtual interface; requires the privileged helper.
     Tun,

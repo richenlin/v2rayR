@@ -52,3 +52,9 @@ macOS 安装新版 helper 后，可在同一条命令前另加 `V2RAYR_TEST_TUN_
 Windows 实机应分别从 MSI 与 NSIS 安装，使用同账号的非提升桌面进程验证首次 UAC、拒绝后重试、TCP/UDP、IPv4/IPv6、DNS，以及正常断开和分别强杀 GUI、helper、core 后的恢复。用 `Get-NetIPInterface`、`Get-NetRoute` 和 `Get-DnsClientServerAddress` 比对接管前后的状态，包含 `WeakHostSend`、切换网卡、升级及损坏文件修复。
 
 Windows 在 PowerShell 中先设置对应的 `$env:V2RAYR_TUN_ISOLATED_TEST` 和 `$env:V2RAYR_TEST_TUN_ADDRESS`，再执行同一条 Cargo 命令。将示例 IP 换成隔离环境中本机实际绑定的私有 IPv4。不要在日常工作机用该用例切换系统网络。
+
+### Windows 重复安装验证
+
+Windows 配置固定 MSI UpgradeCode 为既有默认值 `6aea8c01-633d-535f-9a13-898e41d9d957`，并设置 `allowDowngrades: false`，使 Tauri 的 WiX 模板启用 `AllowSameVersionUpgrades`，让同版本重新构建的 MSI 替换旧产品注册。低版本安装包将被拒绝。NSIS 继续使用固定产品名、按机器安装和默认 Program Files 路径。
+
+`scripts/test-windows-tun-package.ps1` 检查 MSI 与 NSIS 各自重复安装后仅有一条产品注册。可用 `-RebuiltMsi <同版本第二次构建的MSI路径>` 验证不同 ProductCode 的同版本 MSI 升级替换；仅重跑同一个 MSI 不足以覆盖该问题。此脚本需在 Windows 实机运行。

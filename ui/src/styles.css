@@ -26,9 +26,9 @@
   --accent-ink: #183329;
   --accent-soft: #e8f6cf;
 
-  --card: #123e34;
-  --card-ink: #f5fff0;
-  --card-muted: #a8c9b6;
+  --card: var(--panel);
+  --card-ink: var(--ink);
+  --card-muted: var(--muted);
 
   --ok: #1f7a54;
   --warn: #946200;
@@ -390,6 +390,15 @@
   display: flex;
   flex-direction: column;
   min-height: 244px;
+  border: 1px solid var(--line);
+}
+:root:not([data-theme="dark"]) .status-motif {
+  display: none;
+}
+:root:not([data-theme="dark"]) .status-error {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger);
 }
 .status-card > * {
   position: relative;
@@ -531,11 +540,11 @@
 .btn-outline:hover:not(:disabled) {
   background: var(--panel-2);
 }
-.status-card .btn-outline {
+:root[data-theme="dark"] .status-card .btn-outline {
   color: var(--card-ink);
   border-color: rgb(255 255 255 / 0.28);
 }
-.status-card .btn-outline:hover:not(:disabled) {
+:root[data-theme="dark"] .status-card .btn-outline:hover:not(:disabled) {
   background: rgb(255 255 255 / 0.1);
 }
 .btn-quiet {
@@ -739,6 +748,24 @@ textarea.control {
   top: 0;
   background: var(--panel);
   z-index: 2;
+}
+.nodes-row {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 64px 112px;
+}
+.nodes-row .node-sub,
+.node-endpoint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-endpoint {
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.nodes-row .node-name > button,
+.nodes-row .node-name > .badge {
+  flex-shrink: 0;
 }
 .node-name {
   font-weight: 550;
@@ -977,7 +1004,7 @@ textarea.control {
   display: grid;
   grid-template-columns: minmax(0, 1.42fr) minmax(0, 1fr);
   gap: 16px;
-  margin-top: 26px;
+  margin-top: 0;
 }
 .panel-grid {
   display: grid;
@@ -1017,6 +1044,16 @@ textarea.control {
 .toolbar .grow {
   flex: 1;
   min-width: 200px;
+}
+.nodes-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto 132px auto auto;
+}
+.nodes-toolbar .grow {
+  min-width: 0;
+}
+.nodes-toolbar > .btn {
+  white-space: nowrap;
 }
 .segmented {
   display: inline-flex;
@@ -1105,6 +1142,15 @@ textarea.control {
   :root {
     --rail-w: 152px;
     --page-pad: 20px;
+  }
+  .nodes-toolbar {
+    grid-template-columns: minmax(0, 1fr) 132px auto auto;
+  }
+  .nodes-toolbar .grow {
+    grid-column: 1 / -1;
+  }
+  .nodes-toolbar .segmented {
+    justify-self: start;
   }
   .brand-name {
     display: none;

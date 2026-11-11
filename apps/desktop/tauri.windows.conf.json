@@ -6,6 +6,10 @@
       "embedded-cores/windows-tun/": "windows-tun/"
     },
     "windows": {
+      "allowDowngrades": false,
+      "wix": {
+        "upgradeCode": "6aea8c01-633d-535f-9a13-898e41d9d957"
+      },
       "nsis": {
         "installMode": "perMachine",
         "installerHooks": "windows-tun-hooks.nsh"

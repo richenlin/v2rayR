@@ -63,7 +63,7 @@ export function NodesPage() {
       <h1 className="page-title">{t("nodes.title")}</h1>
       <p className="page-sub">{t("nodes.subtitle")}</p>
 
-      <div className="toolbar">
+      <div className="toolbar nodes-toolbar">
         <div className="grow">
           <SearchInput value={query} onChange={setQuery} placeholder={t("nodes.search")} />
         </div>
@@ -106,8 +106,7 @@ export function NodesPage() {
 
       <section className="panel">
         <div
-          className="row row-head"
-          style={{ gridTemplateColumns: "minmax(0,1fr) 220px 84px 210px" }}
+          className="row row-head nodes-row"
           role="row"
         >
           <span>{t("nodes.col.node")}</span>
@@ -213,8 +212,8 @@ function NodeRow({
   void locale;
   return (
     <div
-      className="row"
-      style={{ gridTemplateColumns: "minmax(0,1fr) 220px 84px 210px", height: ROW_HEIGHT, position: "relative" }}
+      className="row nodes-row"
+      style={{ height: ROW_HEIGHT, position: "relative" }}
       role="row"
     >
       <div style={{ minWidth: 0 }}>
@@ -236,13 +235,13 @@ function NodeRow({
             </span>
           ) : null}
         </div>
-        <div className="node-sub">
+        <div className="node-sub" title={`${protocolLabel(node.protocol)} · ${transportLabel(node.transport)} · ${node.core}${node.tags.length ? ` · ${node.tags.join(" / ")}` : ""}${node.subscriptionName ? ` · ${node.subscriptionName}` : ""}`}>
           {protocolLabel(node.protocol)} · {transportLabel(node.transport)} · {node.core}
           {node.tags.length ? ` · ${node.tags.join(" / ")}` : ""}
           {node.subscriptionName ? ` · ${node.subscriptionName}` : ""}
         </div>
       </div>
-      <div className="mono" style={{ fontSize: 12.5, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis" }}>
+      <div className="mono node-endpoint" title={`${node.address}:${node.port}`}>
         {node.address}:{node.port}
       </div>
       <div className="latency" data-tone={latencyTone(node.latency?.ms)}>
