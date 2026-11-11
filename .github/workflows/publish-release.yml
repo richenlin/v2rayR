@@ -1,0 +1,53 @@
+name: Publish installers from successful CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful CI run whose installers should be published
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the source build
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          gh run view "$RUN_ID" --json workflowName,conclusion,headSha,headBranch,url > build.json
+          python3 - <<'PY'
+          import json
+          import os
+          build = json.load(open("build.json"))
+          if build["workflowName"] != "CI" or build["conclusion"] != "success" or build["headBranch"] != "main":
+              raise ValueError("A successful main-branch CI run is required")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("sha=" + build["headSha"] + "\n")
+              output.write("url=" + build["url"] + "\n")
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v2rayR-*
+          path: release-artifacts
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Publish verified installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ steps.build.outputs.sha }}
+          BUILD_URL: ${{ steps.build.outputs.url }}
+        run: |
+          gh api "repos/$GH_REPO/contents/apps/desktop/tauri.conf.json?ref=$BUILD_SHA" --jq .content | base64 -d > source-config.json
+          version=$(node -p 'require("./source-config.json").version')
+          bash scripts/publish-ci-release.sh release-artifacts "$BUILD_SHA" "$version" "$BUILD_URL"
