@@ -366,6 +366,43 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_keeps_tls_and_the_dedupe_fingerprint() {
+        // Regression: export emits `encryption=none` *before* `security=tls`, and
+        // the TLS parser used to treat `encryption` as a security alias, so a
+        // re-imported link came back without TLS/SNI and was stored as a new
+        // node instead of a duplicate.
+        let profile = vless();
+        let link = export_share_link(&profile).expect("export");
+        let parsed = parse_share_link(&link).expect("re-parse");
+        assert!(
+            parsed.tls.is_some(),
+            "TLS must survive the round trip: {link}"
+        );
+        assert_eq!(
+            parsed.tls.as_ref().and_then(|tls| tls.sni.clone()),
+            Some("a.example.com".to_owned()),
+            "SNI must survive the round trip: {link}"
+        );
+        assert_eq!(
+            crate::fingerprint::fingerprint(&profile, b"salt"),
+            crate::fingerprint::fingerprint(&parsed, b"salt"),
+            "round trip must stay dedupe-stable: {link}"
+        );
+    }
+
+    #[test]
+    fn encryption_none_alone_does_not_disable_tls() {
+        let profile = parse_share_link(
+            "vless://11111111-1111-1111-1111-111111111111@a.example.com:443?encryption=none&security=tls&sni=a.example.com#x",
+        )
+        .expect("parse");
+        assert!(
+            profile.tls.is_some(),
+            "security=tls must win over encryption=none"
+        );
+    }
+
+    #[test]
     fn a_trojan_link_round_trips() {
         let mut profile = Profile::new(
             "Seoul",

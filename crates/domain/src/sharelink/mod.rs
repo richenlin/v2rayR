@@ -280,8 +280,12 @@ pub(crate) fn transport_from(
 /// `default_tls` is true for protocols where TLS is the norm (Trojan, Naive,
 /// Hysteria2, TUIC): a link without `security=` still speaks TLS.
 pub(crate) fn tls_from(uri: &Uri, default_tls: bool) -> Option<TlsOptions> {
+    // `encryption=` is *not* a security alias: VLESS uses it for its own
+    // post-quantum spec, and exporters emit `encryption=none&security=tls`.
+    // Including it here made `param` return the first matching query key, so a
+    // round-tripped VLESS link silently lost TLS (and its SNI).
     let security = uri
-        .param(&["security", "tls", "encryption"])
+        .param(&["security", "tls"])
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_default();
 
