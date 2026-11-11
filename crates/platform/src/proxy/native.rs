@@ -46,12 +46,25 @@ impl<B: Backend> NativeProxy<B> {
             return Ok(());
         }
         let observed = self.0.read()?;
-        if values.iter().all(|(k, v)| observed.get(k) == Some(v)) {
+        // Report *which* fields did not stick: a bare "not verified" leaves both
+        // the user and support guessing (WinINet silently rewrites some of them).
+        let mismatched: Vec<String> = values
+            .iter()
+            .filter(|(key, value)| observed.get(*key) != Some(*value))
+            .map(|(key, value)| {
+                format!(
+                    "{key}: 写入 {value:?} 读回 {:?}",
+                    observed.get(key).cloned().unwrap_or_default()
+                )
+            })
+            .collect();
+        if mismatched.is_empty() {
             Ok(())
         } else {
-            Err(PlatformError::InvalidState(
-                "系统代理设置未通过读回验证".into(),
-            ))
+            Err(PlatformError::InvalidState(format!(
+                "系统代理设置未通过读回验证（{}）",
+                mismatched.join("；")
+            )))
         }
     }
 }

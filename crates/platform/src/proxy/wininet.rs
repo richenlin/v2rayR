@@ -158,10 +158,7 @@ mod os {
         },
     };
     use windows_sys::Win32::{
-        Foundation::{
-            ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND,
-            ERROR_SUCCESS,
-        },
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS},
         System::Registry::{
             HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_SZ,
             RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegOpenKeyExW,
@@ -542,6 +539,24 @@ mod os {
         Ok(bytes)
     }
 
+    /// The bypass list WinINet actually applies.
+    ///
+    /// The connection blob is authoritative; `INTERNET_OPTION_PROXY` answers from
+    /// WinINet's own cache and can still return the previous (canonicalised) list
+    /// for a moment after a write, so using it for the read-back check made a
+    /// successful takeover look failed. `ProxyOverride` stays as the mirror for
+    /// machines where the blob was never created.
+    fn effective_bypass() -> Result<String, PlatformError> {
+        if let Some(blob) = reg_bytes(CONNECTIONS, "DefaultConnectionSettings", RRF_RT_REG_BINARY)?
+        {
+            let bytes = connection_bypass(&blob).ok_or_else(|| {
+                PlatformError::InvalidState("Windows 连接代理记录无法解析".into())
+            })?;
+            return decode_ansi(bytes);
+        }
+        stored_bypass()
+    }
+
     /// The LAN connection blob is what WinINet actually applies. `ProxyOverride`
     /// is only the legacy mirror, used when that blob has never been created.
     fn stored_bypass() -> Result<String, PlatformError> {
@@ -626,19 +641,11 @@ mod os {
         fn read(&self) -> Result<Values, PlatformError> {
             let flags = query(10, false).or_else(|_| query(1, false));
             let server = query(2, true);
-            let bypass = query(3, true);
             let pac = query(4, true);
             Ok([
                 ("flags".into(), field("读取系统代理", flags)?),
                 ("server".into(), field("读取系统代理", server)?),
-                (
-                    "bypass".into(),
-                    match bypass {
-                        Ok(value) => value,
-                        Err(ERROR_INVALID_PARAMETER) => stored_bypass()?,
-                        Err(code) => field("读取系统代理", Err(code))?,
-                    },
-                ),
+                ("bypass".into(), effective_bypass()?),
                 ("pac".into(), field("读取系统代理", pac)?),
             ]
             .into())
@@ -654,6 +661,11 @@ mod os {
                 values.insert("server".into(), server_list(target)?);
                 let bypass = bypass_list(&target.bypass)?;
                 values.insert("bypass".into(), bypass);
+                // WinINet clears the stored PAC URL as soon as the PAC bit is
+                // dropped, so the expected value must be empty too. Comparing
+                // against a stale-but-inactive AutoConfigURL made the read-back
+                // check fail on machines where a previous tool left one behind.
+                values.insert("pac".into(), String::new());
             }
             Ok(values)
         }
@@ -841,6 +853,33 @@ mod tests {
         assert_eq!(patterns[1], "172.16.*");
         assert_eq!(patterns[16], "172.31.*");
         assert_eq!(&patterns[17..], &["192.0.2.10", "192.0.2.11"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stale_auto_config_url_is_part_of_the_expected_state() {
+        use crate::proxy::native::{Backend, Values};
+        // A previous tool may leave an inactive AutoConfigURL behind. Writing the
+        // manual proxy drops it, so the expected state must not keep expecting it.
+        let current: Values = [
+            ("flags".to_string(), (DIRECT | PAC).to_string()),
+            ("server".to_string(), String::new()),
+            ("bypass".to_string(), "<local>".to_string()),
+            (
+                "pac".to_string(),
+                "http://127.0.0.1:9/stale.pac".to_string(),
+            ),
+        ]
+        .into();
+        let target = ProxyTarget::all_through("127.0.0.1", 10808);
+        let expected = os::WinInet.target(&current, &target).expect("target state");
+        assert_eq!(expected.get("pac"), Some(&String::new()));
+        assert_eq!(expected.get("flags"), Some(&(DIRECT | PROXY).to_string()));
+        assert!(
+            expected
+                .get("server")
+                .is_some_and(|server| server.contains("127.0.0.1:10808"))
+        );
     }
 
     #[test]
