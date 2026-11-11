@@ -145,8 +145,17 @@ export function NodesPage() {
                   }
                 }}
                 onUse={() => {
+                  // Acting on a node must not silently change the access mode the
+                  // user picked on the connection page: keep the session's mode for
+                  // a switch, and use the currently selected mode/policy for a fresh
+                  // connection instead of a hard-coded system-proxy/rule.
                   if (activeId) void switchNode(node.id);
-                  else void connect(node.id, "system-proxy", "rule");
+                  else
+                    void connect(
+                      node.id,
+                      connection?.mode ?? "system-proxy",
+                      connection?.policy ?? "rule",
+                    );
                 }}
               />
             ))}
