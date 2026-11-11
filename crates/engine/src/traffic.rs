@@ -34,11 +34,19 @@ pub struct TrafficProbe {
 
 impl TrafficProbe {
     pub fn clash(port: u16, secret: impl Into<String>) -> Self {
-        Self::new(format!("http://127.0.0.1:{port}/connections"), secret.into(), Source::Clash)
+        Self::new(
+            format!("http://127.0.0.1:{port}/connections"),
+            secret.into(),
+            Source::Clash,
+        )
     }
 
     pub fn xray(port: u16) -> Self {
-        Self::new(format!("http://127.0.0.1:{port}/debug/vars"), String::new(), Source::XrayMetrics)
+        Self::new(
+            format!("http://127.0.0.1:{port}/debug/vars"),
+            String::new(),
+            Source::XrayMetrics,
+        )
     }
 
     fn new(url: String, secret: String, source: Source) -> Self {
@@ -145,7 +153,13 @@ struct XrayLink {
 }
 
 /// Inbounds that carry user traffic; the metrics listener itself is excluded.
-const XRAY_USER_INBOUNDS: [&str; 5] = ["socks-in", "http-in", "lan-socks", "lan-http", "dokodemo-in"];
+const XRAY_USER_INBOUNDS: [&str; 5] = [
+    "socks-in",
+    "http-in",
+    "lan-socks",
+    "lan-http",
+    "dokodemo-in",
+];
 
 fn parse_xray_metrics(body: &[u8]) -> Result<Counters, EngineError> {
     let parsed: XrayVars = serde_json::from_slice(body)
@@ -168,7 +182,10 @@ mod tests {
     fn clash_counts_connections_without_reading_them() {
         let body = br#"{"downloadTotal":10,"uploadTotal":4,"connections":[{"id":"a","metadata":{}},{"id":"b"}],"memory":1}"#;
         let counters = parse_clash(body).expect("parse");
-        assert_eq!((counters.down, counters.up, counters.connections), (10, 4, 2));
+        assert_eq!(
+            (counters.down, counters.up, counters.connections),
+            (10, 4, 2)
+        );
     }
 
     #[test]

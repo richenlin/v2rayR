@@ -156,8 +156,11 @@ async fn verifies_vless_and_restores_previous_session_and_journal() {
     app.rescan_cores();
     app.set_core_path(CoreKind::Xray, Some(xray));
     let snapshot = app.retry().await.unwrap_or_else(|error| {
-        panic!("retry failed: {error:?}\napp logs: {:?}\nserver log: {}", app.tail_logs(20),
-            std::fs::read_to_string(temp.path().join("server.log")).unwrap_or_default());
+        panic!(
+            "retry failed: {error:?}\napp logs: {:?}\nserver log: {}",
+            app.tail_logs(20),
+            std::fs::read_to_string(temp.path().join("server.log")).unwrap_or_default()
+        );
     });
     assert_eq!(snapshot.connection.phase, ConnectionPhase::Connected);
     assert!(snapshot.connection.takeover_applied);

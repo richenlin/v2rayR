@@ -144,13 +144,19 @@ mod tests {
     fn ticks_accumulate_skip_idle_and_prune() {
         let db = Database::open_in_memory().expect("db");
         let now = Utc::now();
-        db.record_traffic(now - Duration::hours(3), 1, 1).expect("old");
-        db.record_tick(now - Duration::seconds(2), 100, 10, None).expect("tick");
-        db.record_tick(now - Duration::seconds(1), 0, 0, None).expect("idle");
-        db.record_tick(now, 50, 5, Some(now - Duration::hours(2))).expect("prune");
+        db.record_traffic(now - Duration::hours(3), 1, 1)
+            .expect("old");
+        db.record_tick(now - Duration::seconds(2), 100, 10, None)
+            .expect("tick");
+        db.record_tick(now - Duration::seconds(1), 0, 0, None)
+            .expect("idle");
+        db.record_tick(now, 50, 5, Some(now - Duration::hours(2)))
+            .expect("prune");
         assert_eq!(db.totals(), (150, 15));
         assert_eq!(
-            db.recent_traffic(now - Duration::days(1), 10).expect("recent").len(),
+            db.recent_traffic(now - Duration::days(1), 10)
+                .expect("recent")
+                .len(),
             2
         );
     }

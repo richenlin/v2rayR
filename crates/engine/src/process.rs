@@ -77,14 +77,21 @@ impl KernelProcess {
             let mut guardian = Command::new(std::env::current_exe()?);
             #[cfg(unix)]
             isolate_guardian(&mut guardian);
-            guardian.arg("--internal-core-guardian").arg(journal).arg(&spec.program);
+            guardian
+                .arg("--internal-core-guardian")
+                .arg(journal)
+                .arg(&spec.program);
             guardian
         } else {
             Command::new(&spec.program)
         };
         command
             .args(&spec.args)
-            .stdin(if spec.recovery_journal.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if spec.recovery_journal.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         for (key, value) in &spec.env {
@@ -194,7 +201,9 @@ impl KernelProcess {
     }
 
     pub fn is_alive(&mut self) -> bool {
-        if self.child.is_none() { return false; }
+        if self.child.is_none() {
+            return false;
+        }
         matches!(self.child.as_mut().expect("child").try_wait(), Ok(None))
     }
 
@@ -208,7 +217,9 @@ impl KernelProcess {
 
     /// SIGTERM first (the kernel flushes its cache), SIGKILL after `grace`.
     pub async fn stop(&mut self, grace: Duration) -> Result<(), EngineError> {
-        if self.child.is_none() || matches!(self.child.as_mut().expect("child").try_wait(), Ok(Some(_))) {
+        if self.child.is_none()
+            || matches!(self.child.as_mut().expect("child").try_wait(), Ok(Some(_)))
+        {
             return Ok(());
         }
         let guarded = self.guarded;
@@ -258,7 +269,9 @@ impl KernelProcess {
     fn reap_in_background(&mut self) {
         if let Some(mut child) = self.child.take() {
             drop(child.stdin.take());
-            std::thread::spawn(move || { let _ = child.wait(); });
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
     }
 }
@@ -267,7 +280,9 @@ impl Drop for KernelProcess {
     fn drop(&mut self) {
         // Covers launch/probe cancellation and error paths before the child
         // becomes part of SessionRuntime. Normal shutdown has already reaped it.
-        if self.child.is_none() { return; }
+        if self.child.is_none() {
+            return;
+        }
         if self.guarded {
             self.reap_in_background();
             return;
@@ -313,10 +328,18 @@ mod tests {
 
     #[cfg(unix)]
     fn guarded_fixture() -> KernelProcess {
-        let child = Command::new("/bin/sh").args(["-c", "read line; exit 0"])
-            .stdin(Stdio::piped()).spawn().unwrap();
-        KernelProcess { core: CoreKind::SingBox, child: Some(child),
-            log_path: PathBuf::new(), started_at: Instant::now(), guarded: true }
+        let child = Command::new("/bin/sh")
+            .args(["-c", "read line; exit 0"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        KernelProcess {
+            core: CoreKind::SingBox,
+            child: Some(child),
+            log_path: PathBuf::new(),
+            started_at: Instant::now(),
+            guarded: true,
+        }
     }
 
     #[cfg(unix)]
