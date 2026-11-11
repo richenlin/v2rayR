@@ -62,7 +62,7 @@ if [[ "$triple" == *-pc-windows-msvc ]]; then
   (
     cd "$stage/windows-tun"
     printf '%s\n' "$helper_version"
-    sha256sum v2rayr-helper.exe sing-box.exe wintun.dll
+    sha256sum --binary v2rayr-helper.exe sing-box.exe wintun.dll
   ) > "$stage/windows-tun/bundle-v2.sha256"
 fi
 rm -rf -- apps/desktop/embedded-cores

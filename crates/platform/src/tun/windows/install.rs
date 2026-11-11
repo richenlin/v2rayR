@@ -172,12 +172,19 @@ pub fn validate_install() -> io::Result<()> {
         let mut file = std::fs::File::open(path)?;
         let mut hash = Sha256::new();
         io::copy(&mut file, &mut hash)?;
-        let expected = format!("{:x}  {name}", hash.finalize());
-        if !lines
-            .next()
-            .is_some_and(|line| line.eq_ignore_ascii_case(&expected))
-        {
-            return Err(invalid(&format!("Windows TUN 组件摘要不匹配: {name}")));
+        let digest = format!("{:x}", hash.finalize());
+        let line = lines.next().unwrap_or_default();
+        let matches = line.split_once(' ').is_some_and(|(checksum, filename)| {
+            // GNU checksum records put a space (text) or an asterisk (binary)
+            // before the filename. The file digest is always computed on raw bytes.
+            filename.strip_prefix([' ', '*']).is_some_and(|filename| {
+                filename.eq_ignore_ascii_case(name) && checksum.eq_ignore_ascii_case(&digest)
+            })
+        });
+        if !matches {
+            return Err(invalid(&format!(
+                "Windows TUN 组件摘要不匹配: {name}; actual {digest}; manifest {line:?}"
+            )));
         }
     }
     if lines.next().is_some() {
