@@ -3,7 +3,9 @@
 use std::ffi::c_void;
 use std::io;
 
+mod install;
 mod recovery;
+pub use install::validate_install;
 pub use recovery::{capture_network, recovery_pending, restore_network};
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -87,10 +89,6 @@ pub fn provisioned() -> bool {
 }
 
 fn ps(script: &str) -> bool {
-    powershell(script, Duration::from_secs(5), Stdio::null())
-}
-
-fn powershell(script: &str, timeout: Duration, stderr: Stdio) -> bool {
     use base64::Engine;
     let script = script
         .encode_utf16()
@@ -117,10 +115,10 @@ fn powershell(script: &str, timeout: Duration, stderr: Stdio) -> bool {
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr)
+        .stderr(Stdio::null())
         .spawn();
     let Ok(mut child) = child else { return false };
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -134,62 +132,6 @@ fn powershell(script: &str, timeout: Duration, stderr: Stdio) -> bool {
             }
         }
     }
-}
-
-pub fn validate_install() -> io::Result<()> {
-    if !provisioned() {
-        return Err(invalid(
-            "请在默认 Program Files 目录安装或修复 Windows TUN 组件",
-        ));
-    }
-    if !powershell(
-        r#"
-$ErrorActionPreference = 'Stop'
-$app = 'C:\Program Files\v2rayR'
-$root = "$app\windows-tun"
-$trusted = @('S-1-5-32-544','S-1-5-18','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-$read = [long]([System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [System.Security.AccessControl.FileSystemRights]::Synchronize)
-$paths = @('C:\Program Files', $app, $root, "$root\v2rayr-helper.exe", "$root\sing-box.exe", "$root\wintun.dll", "$root\bundle-v2.sha256")
-if (Test-Path -LiteralPath "$root\run") { $paths += "$root\run" }
-foreach ($p in $paths) {
-  if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse point: $p" }
-  $a = Get-Acl -LiteralPath $p
-  $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($a.GetSecurityDescriptorBinaryForm(), 0)
-  if ($null -eq $raw.DiscretionaryAcl) { throw "Missing DACL: $p" }
-  if ($trusted -notcontains $raw.Owner.Value) { throw "Untrusted owner $($raw.Owner.Value): $p" }
-  foreach ($r in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {
-    if (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-    if ($r.AccessControlType -eq 'Allow' -and $trusted -notcontains $r.IdentityReference.Value -and (([long]$r.FileSystemRights -band (-bnot $read)) -ne 0)) { throw "Untrusted write permissions $($r.IdentityReference.Value) $($r.FileSystemRights): $p" }
-  }
-}
-# The dedicated executable directory also controls the DLL search path.
-$allowed = @('v2rayr-helper.exe','sing-box.exe','wintun.dll','Wintun-LICENSE.txt','bundle-v2.sha256','run')
-if (Get-ChildItem -LiteralPath $root -Force | Where-Object { $_.Name -notin $allowed }) { throw "Unexpected files in $root" }
-$files = @('v2rayr-helper.exe','sing-box.exe','wintun.dll')
-$hashes = @(Get-Content -LiteralPath "$root\bundle-v2.sha256")
-if ($hashes.Count -ne ($files.Count + 1)) { throw "Invalid bundle manifest" }
-for ($i = 0; $i -lt $files.Count; $i++) {
-  $file = $files[$i]
-  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "$root\$file").Hash
-  if ($hashes[$i + 1] -ine "$hash  $file") { throw "Bundle hash mismatch: $file" }
-}
-exit 0
-"#,
-        Duration::from_secs(20),
-        Stdio::inherit(),
-    ) {
-        return Err(invalid(
-            "Windows TUN 组件的权限或完整性检查失败，请使用受信任的安装包修复",
-        ));
-    }
-    use std::io::BufRead;
-    let manifest = std::fs::File::open(MANIFEST)?;
-    let mut version = String::new();
-    io::BufReader::new(io::Read::take(manifest, 256)).read_line(&mut version)?;
-    if version.trim_end() != concat!("v2rayr-helper ", env!("CARGO_PKG_VERSION")) {
-        return Err(invalid("Windows TUN 组件版本不匹配，请升级或修复安装"));
-    }
-    Ok(())
 }
 
 pub fn lock_runtime() -> io::Result<crate::InstanceGuard> {
