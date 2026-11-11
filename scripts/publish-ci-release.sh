@@ -59,7 +59,17 @@ if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); the
     exit 0
   fi
 else
-  gh release create "$tag" --target "$commit" --draft --prerelease     --title "v$version CI (${commit:0:7})" --notes-file "$notes"
+  # Pin the tag independently. Omitting target_commitish when creating the
+  # release also lets GITHUB_TOKEN publish an existing historical build.
+  if tagged=$(gh api "repos/{owner}/{repo}/git/ref/tags/$tag" --jq .object.sha 2>/dev/null); then
+    if [[ "$tagged" != "$commit" ]]; then
+      echo "Release tag points to a different commit: $tag" >&2
+      exit 1
+    fi
+  else
+    gh api repos/{owner}/{repo}/git/refs -f "ref=refs/tags/$tag" -f "sha=$commit" > /dev/null
+  fi
+  gh release create "$tag" --draft --prerelease     --title "v$version CI (${commit:0:7})" --notes-file "$notes"
 fi
 assets=("$work"/*)
 upload=()
