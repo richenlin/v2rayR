@@ -35,8 +35,10 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dbus-x11 dconf-gsettings-backend gsettings-desktop-schemas
+          if ! command -v dbus-run-session >/dev/null || ! command -v gsettings >/dev/null; then
+            sudo apt-get update -o Acquire::Retries=5
+            sudo apt-get install -y -o Acquire::Retries=5 dbus dconf-gsettings-backend gsettings-desktop-schemas
+          fi
           export XDG_CONFIG_HOME="$(mktemp -d)"
           export XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=dconf V2RAYR_TEST_GSETTINGS=1
           dbus-run-session -- cargo test -p v2rayr-platform --locked real_gsettings_round_trip -- --ignored

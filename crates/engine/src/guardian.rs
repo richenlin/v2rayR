@@ -61,7 +61,9 @@ pub fn dispatch() {
         }
     };
     // Both waits block in the kernel, so the guardian costs no wakeups for as
-    // long as the session runs.
+    // long as the session runs. Only the Unix path signals by pid; Windows
+    // uses the process handle.
+    #[cfg(unix)]
     let pid = child.id();
     let lease = tx.clone();
     std::thread::spawn(move || {
