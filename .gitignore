@@ -27,5 +27,7 @@ screenshots/
 
 # local build artifacts staged for testing
 /release
+# Local acceptance evidence: databases, core binaries, and captured state.
+/test-results/
 # Desktop installers from scripts/package-desktop.sh
 /dist
