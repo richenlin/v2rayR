@@ -1,0 +1,20 @@
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : localhost
+    1 : 127.0.0.0/8
+    2 : ::1
+  }
+  ExcludeSimpleHostnames : 0
+  FTPPassive : 1
+  HTTPEnable : 1
+  HTTPPort : 1080
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 1080
+  HTTPSProxy : 127.0.0.1
+  ProxyAutoConfigEnable : 0
+  ProxyAutoDiscoveryEnable : 0
+  SOCKSEnable : 1
+  SOCKSPort : 1080
+  SOCKSProxy : 127.0.0.1
+}

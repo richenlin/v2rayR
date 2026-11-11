@@ -84,7 +84,7 @@ Cargo 无法在未装 geoip/geosite 的目录里启动 Xray：`xray -test` 会�
 | --- | --- |
 | 本地混合入站（socks+http） | `settings.inbound.mixedPort`，0 表示 10808 |
 | Xray 的 HTTP 入站 | 入站端口 + 1 |
-| 控制 API（Clash API） | 10812，TUN 时 10813 |
+| 控制 API（sing-box/mihomo 为 Clash API；Xray 为 `metrics.listen` 的 expvar 端点） | 10812，TUN 时 10813 |
 | PAC 脚本服务 | 10811，被占用时顺延到下一个空闲端口并在日志与设置里说明 |
 | 测速 | 内核无关的 TCP 连接，无额外端口 |
 
@@ -128,6 +128,24 @@ UI 展示的端口一律来自 `ConnectionState`，不自行推算；内核实�
 - 事件出口是 `App::events: Arc<dyn EventSink>`：Tauri 壳实现为 `emit`，CLI 与测试用空实现/记录实现，
   这样 app 层不依赖任何 UI 运行时。
 
+## 常驻资源约束
+
+应用大部分时间在托盘里跑，下面这些是刻意的取舍，改动前先确认没有把常驻开销加回来：
+
+- **UI 不轮询快照**。前端订阅 `session://changed`（完整快照）与 `traffic://tick`（只含流量）；
+  另有一个 30 秒、窗口不可见时暂停的兜底刷新。流量单独存放在 store 的 `traffic` 字段，
+  每秒的 tick 只重渲染流量面板，不会让节点列表等页面跟着重算。
+- **关闭到托盘即销毁 webview**（`PARKED`），再次显示时按 `tauri.conf.json` 里 `create: false` 的窗口配置重建，
+  页面加载完成后才显示窗口，避免空白帧；`startMinimized` 且有托盘时启动阶段根本不建窗口。
+  销毁窗口触发的 `ExitRequested { code: None }` 在 `PARKED` 时被拒绝，真正的退出（托盘「退出」、更新重启）带 `code`。
+- **流量泵**：有可见窗口时 1 秒一次，否则 5 秒一次（内核计数是累计值，总量不受影响）；窗口打开时立即唤醒。
+  每个会话持有一个 `TrafficProbe`（单个回环 HTTP 客户端，keep-alive），`/connections` 只解析总量并计数连接、
+  不把连接明细反序列化成 JSON 树；Xray 用 `metrics.listen` 的 `/debug/vars`，不再每秒派生 `xray api` 子进程。
+  不支持 `metrics.listen` 的旧版 Xray 仍能连接，只是没有流量数据（日志里记一次警告）。
+- **SQLite**：每个 tick 一个事务，零流量的 tick 不写库，过期样本每分钟清理一次。
+- **内核日志**：默认级别 `warn`（`info` 会逐连接记日志）；启动内核前日志超过 4 MiB 就轮转为 `<name>.log.1`。
+- **guardian** 进程用阻塞等待（stdin 租约 + 子进程退出各一个线程），会话期间不产生定时唤醒。
+
 ## 安全边界
 
 - 节点密钥不进入 `NodeView`，日志里只出现脱敏后的 URL（`https://***@host`）。
@@ -157,5 +175,6 @@ UI 展示的端口一律来自 `ConnectionState`，不自行推算；内核实�
 - 单实例用 `run/v2rayr.lock`：文件里是 pid，第二次启动看到活着的 pid 就尝试激活已有窗口并退出；
   看到死 pid 就接管锁。测试覆盖「第二个实例看到第一个」和「陈旧锁被接管」两种情况。
 - 托盘菜单：显示主窗口 / 重新连接（沿用上次模式）/ 断开连接 / 退出。左键点击托盘图标显示窗口。
-- `startup.closeToTray = true` 时关闭窗口只隐藏，代理继续运行；`startup.startMinimized = true` 时启动即隐藏。
+- `startup.closeToTray = true` 时关闭窗口会销毁 webview、只留托盘，代理继续运行；`startup.startMinimized = true` 时启动不建窗口。
+  macOS 上再次启动应用或点 Dock 图标会通过 `reopen` 重建窗口。
 - 命令行里的分享链接与 `v2rayr://import/<base64>` 会排队导入，导入结果在下一次 snapshot 里出现。

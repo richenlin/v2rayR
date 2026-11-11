@@ -1,3 +1,4 @@
+import { useStoredState } from "../lib/useStoredState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Modal } from "../components/Modal";
 import { Icon } from "../components/Icon";
@@ -364,9 +365,9 @@ export function SettingsPage() {
   const resetSettings = useStore((state) => state.resetSettings);
   const probeCores = useStore((state) => state.probeCores);
   const installCore = useStore((state) => state.installCore);
-  const [group, setGroup] = useState<Group>("inbound");
-  const [search, setSearch] = useState("");
-  const [drafts, setDrafts] = useState<Partial<GroupDraft>>({});
+  const [group, setGroup] = useStoredState<Group>("v2rayr.settings.group", "inbound");
+  const [search, setSearch] = useStoredState("v2rayr.settings.search", "");
+  const [drafts, setDrafts] = useStoredState<Partial<GroupDraft>>("v2rayr.settings.drafts", {});
 
   const settings = snapshot?.settings;
   if (!settings || !snapshot) return <div className="page" />;

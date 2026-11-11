@@ -10,6 +10,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "v2rayR",
         "width": 1200,
         "height": 820,

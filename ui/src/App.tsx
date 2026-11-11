@@ -10,6 +10,7 @@ import { SettingsPage } from "./pages/Settings";
 import { SpeedtestPage } from "./pages/Speedtest";
 import { SubscriptionsPage } from "./pages/Subscriptions";
 import { pageFromHash, useStore, useT } from "./store";
+import type { AppSnapshot, TrafficView } from "./lib/types";
 
 export default function App() {
   const t = useT();
@@ -31,7 +32,7 @@ export default function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<string>("app-update-available", ({ payload }) => {
-      useStore.getState().toast("info", t("maintenance.updateAvailable"), payload);
+      if (!disposed) useStore.getState().toast("info", t("maintenance.updateAvailable"), payload);
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
     return () => { disposed = true; unlisten?.(); };
   }, [t]);
@@ -46,13 +47,15 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, [navigate]);
 
-  // One poll loop for every page: 1 s while a session is active, 5 s otherwise.
+  // The preview backend has no events, so it keeps the old poll loop.
   useEffect(() => {
+    if (!isPreview) return;
     let cancelled = false;
     let timer: number | undefined;
     const tick = async () => {
       if (cancelled) return;
       await refresh();
+      if (cancelled) return;
       const state = useStore.getState().snapshot?.connection.phase;
       const delay = state === "connected" || state === "connecting" ? 1000 : 5000;
       timer = window.setTimeout(tick, delay);
@@ -61,6 +64,33 @@ export default function App() {
     return () => {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
+    };
+  }, [refresh]);
+
+  // The backend pushes every session change and every traffic tick, so the
+  // window never polls the full snapshot (all nodes and subscriptions) on a
+  // timer. The slow refresh only covers changes no command or event reports,
+  // and stops while the window is hidden.
+  useEffect(() => {
+    if (isPreview) return;
+    let disposed = false;
+    const stops: Array<() => void> = [];
+    const keep = (stop: () => void) => { if (disposed) stop(); else stops.push(stop); };
+    const sessionReady = listen<AppSnapshot>("session://changed", ({ payload }) => {
+      if (!disposed) useStore.getState().adoptSnapshot(payload);
+    }).then(keep).catch(() => {});
+    const trafficReady = listen<TrafficView>("traffic://tick", ({ payload }) => {
+      if (!disposed) useStore.getState().applyTraffic(payload);
+    }).then(keep).catch(() => {});
+    void Promise.all([sessionReady, trafficReady]).then(() => { if (!disposed) void refresh(); });
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 30_000);
+    return () => {
+      disposed = true;
+      stops.forEach((stop) => stop());
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(timer);
     };
   }, [refresh]);
 

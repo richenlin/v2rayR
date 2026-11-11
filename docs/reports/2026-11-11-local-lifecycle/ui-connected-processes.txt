@@ -1,0 +1,3 @@
+57539     1 57539 Ss   /tmp/v2rayr-lifecycle-qa/v2rayR Lifecycle QA.app/Contents/MacOS/v2rayr-desktop
+58488 57539 58488 S    /tmp/v2rayr-lifecycle-qa/v2rayR Lifecycle QA.app/Contents/MacOS/v2rayr-desktop --internal-core-guardian /tmp/v2rayr-local-lifecycle-ui/run/takeover.json /tmp/v2rayr-local-lifecycle-ui/data/cores/sing-box run -c /tmp/v2rayr-local-lifecycle-ui/run/sing-box-config.json -D /tmp/v2rayr-local-lifecycle-ui/data
+58489 58488 58488 S    /tmp/v2rayr-local-lifecycle-ui/data/cores/sing-box run -c /tmp/v2rayr-local-lifecycle-ui/run/sing-box-config.json -D /tmp/v2rayr-local-lifecycle-ui/data

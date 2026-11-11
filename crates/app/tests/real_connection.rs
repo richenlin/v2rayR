@@ -92,7 +92,8 @@ async fn verifies_vless_and_restores_previous_session_and_journal() {
         serde_json::json!({
             "inbounds":[{"port":server_port,"listen":"127.0.0.1","protocol":"vless",
                 "settings":{"clients":[{"id":id}],"decryption":"none"}}],
-            "outbounds":[{"protocol":"freedom","settings":{"redirect":format!("127.0.0.1:{backend_port}")}}]
+            "outbounds":[{"protocol":"freedom","settings":{"redirect":format!("127.0.0.1:{backend_port}"),
+                "finalRules":[{"action":"allow","ip":["127.0.0.1/32"],"port":backend_port}] }}]
         }).to_string(),
     ).unwrap();
     drop(free);
@@ -154,7 +155,10 @@ async fn verifies_vless_and_restores_previous_session_and_journal() {
     std::fs::copy(sing_box, paths.core_bin_dir().join("sing-box")).unwrap();
     app.rescan_cores();
     app.set_core_path(CoreKind::Xray, Some(xray));
-    let snapshot = app.retry().await.unwrap();
+    let snapshot = app.retry().await.unwrap_or_else(|error| {
+        panic!("retry failed: {error:?}\napp logs: {:?}\nserver log: {}", app.tail_logs(20),
+            std::fs::read_to_string(temp.path().join("server.log")).unwrap_or_default());
+    });
     assert_eq!(snapshot.connection.phase, ConnectionPhase::Connected);
     assert!(snapshot.connection.takeover_applied);
     assert!(hits.load(Ordering::SeqCst) > 0);

@@ -26,6 +26,7 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
     pub log_path: PathBuf,
     pub env: Vec<(String, String)>,
+    pub recovery_journal: Option<PathBuf>,
 }
 
 impl LaunchSpec {
@@ -41,6 +42,7 @@ impl LaunchSpec {
             args,
             log_path: log_path.into(),
             env: Vec::new(),
+            recovery_journal: None,
         }
     }
 
@@ -53,9 +55,10 @@ impl LaunchSpec {
 #[derive(Debug)]
 pub struct KernelProcess {
     core: CoreKind,
-    child: Child,
+    child: Option<Child>,
     log_path: PathBuf,
     started_at: Instant,
+    guarded: bool,
 }
 
 impl KernelProcess {
@@ -63,16 +66,25 @@ impl KernelProcess {
         if let Some(parent) = spec.log_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        rotate_log(&spec.log_path);
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&spec.log_path)?;
         let stderr = stdout.try_clone()?;
 
-        let mut command = Command::new(&spec.program);
+        let mut command = if let Some(journal) = &spec.recovery_journal {
+            let mut guardian = Command::new(std::env::current_exe()?);
+            #[cfg(unix)]
+            isolate_guardian(&mut guardian);
+            guardian.arg("--internal-core-guardian").arg(journal).arg(&spec.program);
+            guardian
+        } else {
+            Command::new(&spec.program)
+        };
         command
             .args(&spec.args)
-            .stdin(Stdio::null())
+            .stdin(if spec.recovery_journal.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         for (key, value) in &spec.env {
@@ -93,9 +105,10 @@ impl KernelProcess {
         );
         Ok(Self {
             core: spec.core,
-            child,
+            child: Some(child),
             log_path: spec.log_path.clone(),
             started_at: Instant::now(),
+            guarded: spec.recovery_journal.is_some(),
         })
     }
 
@@ -104,7 +117,7 @@ impl KernelProcess {
     }
 
     pub fn pid(&self) -> Option<u32> {
-        Some(self.child.id())
+        self.child.as_ref().map(Child::id)
     }
 
     pub fn log_path(&self) -> &Path {
@@ -155,7 +168,8 @@ impl KernelProcess {
 
     /// Non-blocking "did it die?" — `None` while it is still running.
     pub fn exit_error(&mut self) -> Option<EngineError> {
-        match self.child.try_wait() {
+        self.child.as_ref()?;
+        match self.child.as_mut().expect("child").try_wait() {
             Ok(Some(status)) => {
                 let tail = logs::tail(&self.log_path, 8).unwrap_or_default();
                 Some(EngineError::StartupFailed {
@@ -180,11 +194,13 @@ impl KernelProcess {
     }
 
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        if self.child.is_none() { return false; }
+        matches!(self.child.as_mut().expect("child").try_wait(), Ok(None))
     }
 
     pub fn exit_code(&mut self) -> Option<i32> {
-        match self.child.try_wait() {
+        self.child.as_ref()?;
+        match self.child.as_mut().expect("child").try_wait() {
             Ok(Some(status)) => status.code(),
             _ => None,
         }
@@ -192,29 +208,43 @@ impl KernelProcess {
 
     /// SIGTERM first (the kernel flushes its cache), SIGKILL after `grace`.
     pub async fn stop(&mut self, grace: Duration) -> Result<(), EngineError> {
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
+        if self.child.is_none() || matches!(self.child.as_mut().expect("child").try_wait(), Ok(Some(_))) {
             return Ok(());
         }
+        let guarded = self.guarded;
+        drop(self.child.as_mut().expect("child").stdin.take());
         #[cfg(unix)]
-        {
+        if !guarded {
             let _ = Command::new("/bin/kill")
                 .arg("-TERM")
-                .arg(self.child.id().to_string())
+                .arg(self.child.as_ref().expect("child").id().to_string())
                 .status();
         }
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
+            if matches!(self.child.as_mut().expect("child").try_wait(), Ok(Some(_))) {
                 tracing::info!(core = self.core.as_str(), "kernel stopped");
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        if guarded {
+            // Transfer the handle to a waiter; never kill the guardian mid-restore.
+            self.reap_in_background();
+            return Ok(());
+        }
         tracing::warn!(core = self.core.as_str(), "kernel ignored SIGTERM, killing");
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.child.as_mut().expect("child").kill();
+        let _ = self.child.as_mut().expect("child").wait();
         Ok(())
     }
+}
+
+/// A terminal HUP/INT targets the foreground group, not the guardian's lease.
+#[cfg(unix)]
+fn isolate_guardian(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
 }
 
 /// `CREATE_NO_WINDOW`. The child already has its standard streams redirected.
@@ -224,20 +254,113 @@ pub(crate) fn hide_console(command: &mut Command) {
     command.creation_flags(0x0800_0000);
 }
 
+impl KernelProcess {
+    fn reap_in_background(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            drop(child.stdin.take());
+            std::thread::spawn(move || { let _ = child.wait(); });
+        }
+    }
+}
+
 impl Drop for KernelProcess {
     fn drop(&mut self) {
         // Covers launch/probe cancellation and error paths before the child
         // becomes part of SessionRuntime. Normal shutdown has already reaped it.
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        if self.child.is_none() { return; }
+        if self.guarded {
+            self.reap_in_background();
+            return;
         }
+        if matches!(self.child.as_mut().expect("child").try_wait(), Ok(None)) {
+            let _ = self.child.as_mut().expect("child").kill();
+            let _ = self.child.as_mut().expect("child").wait();
+        }
+    }
+}
+
+/// Above this size the previous log moves to `<name>.1` before a launch.
+const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The kernel appends to its log for as long as it runs; without rotation the
+/// file grows across every session for the lifetime of the install.
+fn rotate_log(path: &Path) {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > LOG_ROTATE_BYTES) {
+        let mut rotated = path.as_os_str().to_owned();
+        rotated.push(".1");
+        let _ = std::fs::rename(path, rotated);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn guardian_starts_in_its_own_process_group() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        isolate_guardian(&mut command);
+        let mut child = command.spawn().unwrap();
+        let group = unsafe { libc::getpgid(child.id() as i32) };
+        let parent_group = unsafe { libc::getpgrp() };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(group, child.id() as i32);
+        assert_ne!(group, parent_group);
+    }
+
+    #[cfg(unix)]
+    fn guarded_fixture() -> KernelProcess {
+        let child = Command::new("/bin/sh").args(["-c", "read line; exit 0"])
+            .stdin(Stdio::piped()).spawn().unwrap();
+        KernelProcess { core: CoreKind::SingBox, child: Some(child),
+            log_path: PathBuf::new(), started_at: Instant::now(), guarded: true }
+    }
+
+    #[cfg(unix)]
+    async fn assert_reaped(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { libc::kill(pid as i32, 0) } == 0 {
+            assert!(Instant::now() < deadline, "guardian was not reaped");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guarded_drop_transfers_handle_to_reaper() {
+        let process = guarded_fixture();
+        let pid = process.pid().unwrap();
+        drop(process);
+        assert_reaped(pid).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guarded_stop_timeout_transfers_handle_to_reaper() {
+        let mut process = guarded_fixture();
+        let pid = process.pid().unwrap();
+        process.stop(Duration::ZERO).await.unwrap();
+        assert!(process.child.is_none());
+        assert_reaped(pid).await;
+        process.stop(Duration::ZERO).await.unwrap();
+    }
+
+    #[test]
+    fn oversized_logs_rotate_before_launch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("xray.log");
+        std::fs::write(&log, vec![b'x'; LOG_ROTATE_BYTES as usize + 1]).expect("write");
+        rotate_log(&log);
+        assert!(!log.exists());
+        assert!(dir.path().join("xray.log.1").exists());
+
+        std::fs::write(&log, b"small").expect("write");
+        rotate_log(&log);
+        assert!(log.exists());
+    }
 
     #[tokio::test]
     async fn launching_a_missing_binary_reports_spawn_failure() {

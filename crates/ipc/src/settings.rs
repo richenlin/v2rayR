@@ -184,7 +184,9 @@ impl Default for AdvancedSettings {
     fn default() -> Self {
         Self {
             core_override: CoreOverride::Auto,
-            log_level: LogLevel::Info,
+            // Info makes the kernels log every connection (three lines per
+            // request for Xray); a resident proxy should not write that by default.
+            log_level: LogLevel::Warn,
             tun_mtu: 1500,
             sniffing: true,
             tcp_fast_open: true,

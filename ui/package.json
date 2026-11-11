@@ -7,7 +7,8 @@
     "dev": "vite --port 1420 --strictPort",
     "build": "vite build && node scripts/inline.mjs",
     "preview": "vite preview --port 1420",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:lifecycle": "node scripts/verify-lifecycle.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

@@ -12,6 +12,7 @@ pub mod fetcher;
 pub mod latency;
 pub mod logs;
 pub mod process;
+pub mod guardian;
 pub mod traffic;
 
 use v2rayr_domain::{CoreKind, ErrorCode};

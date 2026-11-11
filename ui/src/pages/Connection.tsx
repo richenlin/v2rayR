@@ -86,6 +86,42 @@ function LanAccess({ lan }: { lan: NonNullable<ConnectionState["lan"]> }) {
   );
 }
 
+function TrafficPanel() {
+  const t = useT();
+  const traffic = useStore((state) => state.traffic);
+  const down = rate(traffic?.downBps ?? 0);
+  const up = rate(traffic?.upBps ?? 0);
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h2 className="panel-title">{t("connection.traffic")}</h2>
+        <span className="panel-note">{t("connection.traffic.window")}</span>
+      </div>
+      <div className="panel-body" style={{ paddingTop: 14 }}>
+        <div className="traffic-numbers">
+          <div className="traffic-number">
+            <span>{t("connection.down")}</span>
+            <b>
+              {down.value} <span style={{ fontSize: 14, fontWeight: 500 }}>{down.unit}</span>
+            </b>
+          </div>
+          <div className="traffic-number">
+            <span>{t("connection.up")}</span>
+            <b>
+              {up.value} <span style={{ fontSize: 14, fontWeight: 500 }}>{up.unit}</span>
+            </b>
+          </div>
+        </div>
+        <Sparkline samples={traffic?.samples} />
+        <p className="traffic-foot">
+          {t("connection.traffic.note")} · {bytes(traffic?.totalDownBytes ?? 0)} ↓ /{" "}
+          {bytes(traffic?.totalUpBytes ?? 0)} ↑
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export function ConnectionPage() {
   const t = useT();
   const lang = useLang();
@@ -130,8 +166,6 @@ export function ConnectionPage() {
     return <div className="page" />;
   }
 
-  const down = rate(snapshot.traffic.downBps);
-  const up = rate(snapshot.traffic.upBps);
   const isBusy = phase === "connecting" || phase === "disconnecting" || busy !== null;
 
   const headline = phase === "connected" && mode === "manual" ? t("connection.localOnly") : phase === "failed" && mode === "tun" ? t("connection.failedTun") : phaseHeadline(t, phase);
@@ -208,33 +242,7 @@ export function ConnectionPage() {
           </div>
         </section>
 
-        <section className="panel">
-          <div className="panel-head">
-            <h2 className="panel-title">{t("connection.traffic")}</h2>
-            <span className="panel-note">{t("connection.traffic.window")}</span>
-          </div>
-          <div className="panel-body" style={{ paddingTop: 14 }}>
-            <div className="traffic-numbers">
-              <div className="traffic-number">
-                <span>{t("connection.down")}</span>
-                <b>
-                  {down.value} <span style={{ fontSize: 14, fontWeight: 500 }}>{down.unit}</span>
-                </b>
-              </div>
-              <div className="traffic-number">
-                <span>{t("connection.up")}</span>
-                <b>
-                  {up.value} <span style={{ fontSize: 14, fontWeight: 500 }}>{up.unit}</span>
-                </b>
-              </div>
-            </div>
-            <Sparkline samples={snapshot.traffic.samples} />
-            <p className="traffic-foot">
-              {t("connection.traffic.note")} · {bytes(snapshot.traffic.totalDownBytes)} ↓ /{" "}
-              {bytes(snapshot.traffic.totalUpBytes)} ↑
-            </p>
-          </div>
-        </section>
+        <TrafficPanel />
       </div>
 
       {phase === "connected" && connection.lan

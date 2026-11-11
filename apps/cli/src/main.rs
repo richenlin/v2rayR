@@ -154,8 +154,12 @@ enum SubCommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    v2rayr_app::dispatch_core_guardian();
+    tokio::runtime::Runtime::new()?.block_on(cli_main())
+}
+
+async fn cli_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let paths = match &cli.home {
         Some(root) => AppPaths::new(root.clone()),

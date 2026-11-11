@@ -61,6 +61,31 @@ impl Database {
         Ok(items)
     }
 
+    /// One traffic tick in a single write transaction. Idle ticks write nothing,
+    /// so a connected-but-quiet session does not churn the WAL every second.
+    pub fn record_tick(
+        &self,
+        ts: DateTime<Utc>,
+        down_bytes: u64,
+        up_bytes: u64,
+        prune_before: Option<DateTime<Utc>>,
+    ) -> Result<(), crate::StoreError> {
+        let moved = down_bytes != 0 || up_bytes != 0;
+        if !moved && prune_before.is_none() {
+            return Ok(());
+        }
+        let tx = self.conn().unchecked_transaction()?;
+        if moved {
+            self.add_totals(down_bytes, up_bytes)?;
+            self.record_traffic(ts, down_bytes, up_bytes)?;
+        }
+        if let Some(before) = prune_before {
+            self.prune_traffic(before)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn prune_traffic(&self, before: DateTime<Utc>) -> Result<usize, crate::StoreError> {
         Ok(self.conn().execute(
             "DELETE FROM traffic_samples WHERE ts < ?1",
@@ -104,6 +129,29 @@ mod tests {
                 .expect("recent")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_failed_sample_rolls_back_totals_too() {
+        let db = Database::open_in_memory().expect("db");
+        db.conn().execute_batch("CREATE TRIGGER reject_sample BEFORE INSERT ON traffic_samples BEGIN SELECT RAISE(ABORT, 'fixture'); END;").unwrap();
+        assert!(db.record_tick(Utc::now(), 100, 10, None).is_err());
+        assert_eq!(db.totals(), (0, 0));
+    }
+
+    #[test]
+    fn ticks_accumulate_skip_idle_and_prune() {
+        let db = Database::open_in_memory().expect("db");
+        let now = Utc::now();
+        db.record_traffic(now - Duration::hours(3), 1, 1).expect("old");
+        db.record_tick(now - Duration::seconds(2), 100, 10, None).expect("tick");
+        db.record_tick(now - Duration::seconds(1), 0, 0, None).expect("idle");
+        db.record_tick(now, 50, 5, Some(now - Duration::hours(2))).expect("prune");
+        assert_eq!(db.totals(), (150, 15));
+        assert_eq!(
+            db.recent_traffic(now - Duration::days(1), 10).expect("recent").len(),
+            2
         );
     }
 }

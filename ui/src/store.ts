@@ -20,6 +20,7 @@ import type {
   SettingsPatch,
   TakeoverMode,
   RoutingPolicy,
+  TrafficView,
 } from "./lib/types";
 
 export type Page = "connection" | "nodes" | "subscriptions" | "speedtest" | "settings";
@@ -33,6 +34,11 @@ export interface Toast {
 
 interface State {
   snapshot?: AppSnapshot;
+  /**
+   * Kept apart from `snapshot` so the once-per-second traffic tick re-renders
+   * only the traffic panel, not every page that reads the snapshot.
+   */
+  traffic?: TrafficView;
   loading: boolean;
   bootError?: string;
   page: Page;
@@ -50,6 +56,8 @@ interface State {
 
   boot: () => Promise<void>;
   refresh: () => Promise<void>;
+  adoptSnapshot: (snapshot: AppSnapshot) => void;
+  applyTraffic: (traffic: TrafficView) => void;
   navigate: (page: Page) => void;
   toast: (tone: Toast["tone"], title: string, detail?: string) => void;
   dismissToast: (id: number) => void;
@@ -91,6 +99,8 @@ interface State {
 }
 
 let toastSeq = 0;
+let stateRevision = 0;
+let trafficRevision = 0;
 
 function detectInitialTheme(): "light" | "dark" {
   if (typeof window === "undefined") return "light";
@@ -109,16 +119,20 @@ export const useStore = create<State>((set, get) => ({
   testing: false,
   testProgress: { done: 0, total: 0 },
   lastResults: [],
-  nodeQuery: "",
-  nodeScope: "all",
-  nodeProtocol: "all",
+  nodeQuery: readStorage("v2rayr.nodeQuery") ?? "",
+  nodeScope: readStorage("v2rayr.nodeScope") === "favorites" ? "favorites" : "all",
+  nodeProtocol: readStorage("v2rayr.nodeProtocol") ?? "all",
   rules: [],
 
   boot: async () => {
     try {
-      const snapshot = await api.snapshot();
+      const revision = stateRevision;
+      const trafficTick = trafficRevision;
+      const received = await api.snapshot();
+      const snapshot = revision === stateRevision ? received : get().snapshot ?? received;
       set({
         snapshot,
+        traffic: trafficTick === trafficRevision ? snapshot.traffic : get().traffic ?? snapshot.traffic,
         loading: false,
         bootError: undefined,
         page: pageFromHash(),
@@ -138,14 +152,26 @@ export const useStore = create<State>((set, get) => ({
 
   refresh: async () => {
     try {
+      const revision = stateRevision;
+      const trafficTick = trafficRevision;
       const snapshot = await api.snapshot();
-      set({ snapshot });
+      // Session events invalidate the whole response. Traffic events only
+      // replace its traffic, so slow requests still refresh nodes and settings.
+      if (revision === stateRevision) get().adoptSnapshot({
+        ...snapshot,
+        traffic: trafficTick === trafficRevision ? snapshot.traffic : get().traffic ?? snapshot.traffic,
+      });
     } catch {
       // A poll failure is not worth a toast; the next tick will tell.
     }
   },
 
+  adoptSnapshot: (snapshot) => { stateRevision += 1; trafficRevision += 1; set({ snapshot, traffic: snapshot.traffic }); },
+
+  applyTraffic: (traffic) => { trafficRevision += 1; set({ traffic }); },
+
   navigate: (page) => {
+    writeStorage("v2rayr.page", page);
     set({ page });
     if (typeof window !== "undefined") {
       window.location.hash = `#/${page}`;
@@ -177,7 +203,7 @@ export const useStore = create<State>((set, get) => ({
     set({ busy: "connect" });
     try {
       const snapshot = await api.connect(id, mode, policy);
-      set({ snapshot });
+      get().adoptSnapshot(snapshot);
       get().toast("ok", "已连接", snapshot.connection.profileRemark);
     } catch (error) {
       const problem = toProblem(error) as Problem;
@@ -193,7 +219,7 @@ export const useStore = create<State>((set, get) => ({
     set({ busy: "disconnect" });
     try {
       const snapshot = await api.disconnect();
-      set({ snapshot });
+      get().adoptSnapshot(snapshot);
       get().toast("info", translate(get().lang, "connection.disconnected"));
     } catch (error) {
       const problem = toProblem(error) as Problem;
@@ -207,7 +233,7 @@ export const useStore = create<State>((set, get) => ({
     set({ busy: "switch" });
     try {
       const snapshot = await api.switchNode(id);
-      set({ snapshot });
+      get().adoptSnapshot(snapshot);
       get().toast("ok", translate(get().lang, "connection.current"), snapshot.connection.profileRemark);
     } catch (error) {
       const problem = toProblem(error) as Problem;
@@ -221,7 +247,7 @@ export const useStore = create<State>((set, get) => ({
   setMode: async (mode) => {
     try {
       const snapshot = await api.setMode(mode);
-      set({ snapshot });
+      get().adoptSnapshot(snapshot);
     } catch (error) {
       const problem = toProblem(error) as Problem;
       get().toast("danger", translate(get().lang, "connection.failed"), problemTextSafe(get().lang, problem));
@@ -232,7 +258,7 @@ export const useStore = create<State>((set, get) => ({
   setPolicy: async (policy) => {
     try {
       const snapshot = await api.setPolicy(policy);
-      set({ snapshot });
+      get().adoptSnapshot(snapshot);
       get().toast("info", translate(get().lang, "connection.policy"), policyLabel(get().lang, policy));
     } catch (error) {
       const problem = toProblem(error) as Problem;
@@ -245,7 +271,7 @@ export const useStore = create<State>((set, get) => ({
     set({ busy: "retry" });
     try {
       const snapshot = await api.retry();
-      set({ snapshot });
+      get().adoptSnapshot(snapshot);
     } catch (error) {
       const problem = toProblem(error) as Problem;
       await get().refresh();
@@ -529,9 +555,9 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  setNodeQuery: (nodeQuery) => set({ nodeQuery }),
-  setNodeScope: (nodeScope) => set({ nodeScope }),
-  setNodeProtocol: (nodeProtocol) => set({ nodeProtocol }),
+  setNodeQuery: (nodeQuery) => { writeStorage("v2rayr.nodeQuery", nodeQuery); set({ nodeQuery }); },
+  setNodeScope: (nodeScope) => { writeStorage("v2rayr.nodeScope", nodeScope); set({ nodeScope }); },
+  setNodeProtocol: (nodeProtocol) => { writeStorage("v2rayr.nodeProtocol", nodeProtocol); set({ nodeProtocol }); },
 }));
 
 export function useT(): (key: string, vars?: Record<string, string | number>) => string {
@@ -546,7 +572,7 @@ export function useLang(): Lang {
 export function pageFromHash(): Page {
   const hash = typeof window === "undefined" ? "" : window.location.hash.replace(/^#\/?/, "");
   const pages: Page[] = ["connection", "nodes", "subscriptions", "speedtest", "settings"];
-  return (pages.find((page) => page === hash) ?? "connection") as Page;
+  return (pages.find((page) => page === (hash || readStorage("v2rayr.page"))) ?? "connection") as Page;
 }
 
 export function applyDocumentTheme(theme: "light" | "dark"): void {

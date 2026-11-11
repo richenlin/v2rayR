@@ -341,7 +341,7 @@ const defaultSettings = (): SettingsView => ({
   appearance: { theme: "system", language: "system", compact: false, reduceMotion: false },
   advanced: {
     coreOverride: "auto",
-    logLevel: "info",
+    logLevel: "warn",
     tunMtu: 1500,
     sniffing: true,
     tcpFastOpen: true,

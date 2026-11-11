@@ -6,6 +6,17 @@
     <meta name="color-scheme" content="light dark" />
     <title>v2rayR</title>
     <script>
+      // The window is recreated each time it leaves the tray; pick the theme
+      // before first paint so a dark UI does not flash light while React boots.
+      (function () {
+        var theme = null;
+        try { theme = localStorage.getItem("v2rayr.theme"); } catch (_) {}
+        if (theme !== "light" && theme !== "dark") {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
       function showBootError(text) {
         document.title = "ERR " + text;
         var root = document.getElementById("root");

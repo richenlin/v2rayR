@@ -4,14 +4,16 @@
 //! and the UI talks to nothing else. That keeps the desktop build testable in
 //! CI without a display server and means the CLI and the GUI cannot drift.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::webview::PageLoadEvent;
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
+use tokio::sync::Notify;
 use tauri_plugin_updater::UpdaterExt;
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -25,6 +27,24 @@ struct Shell {
     _instance: Option<InstanceGuard>,
     quit_stage: AtomicU8,
     updating: AtomicBool,
+    /// Wakes the traffic pump so a window that just opened gets live numbers
+    /// without waiting out the background interval.
+    pump_wake: Arc<Notify>,
+    window_state: Mutex<Option<MainWindowState>>,
+}
+
+/// True while the app runs from the tray with no webview at all. Closing to the
+/// tray destroys the window instead of hiding it: a hidden webview keeps its
+/// renderer process, JS heap and GPU surfaces resident for nothing.
+static PARKED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+struct MainWindowState {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    maximized: bool,
 }
 
 struct StartupFailure {
@@ -411,6 +431,7 @@ fn paths(state: State<'_, Shell>) -> Value {
 
 /// Entry point shared by `main.rs` and mobile targets.
 pub fn run() {
+    v2rayr_app::dispatch_core_guardian();
     tracing::info!("starting v2rayR desktop");
     let app_paths = AppPaths::discover().unwrap_or_else(|_| AppPaths::new("."));
 
@@ -460,16 +481,30 @@ pub fn run() {
                 Err(problem) => {
                     eprintln!("v2rayR 无法启动：{problem}");
                     handle.manage(StartupFailure { problem, _instance: instance });
+                    create_main(handle.handle(), true)?;
                     return Ok(());
                 }
             };
 
-            // Traffic pump: one tick per second, independent of the UI being open.
+            // Traffic pump: runs without the UI because it also persists totals
+            // and notices a dead kernel. Once a second while someone is
+            // watching; otherwise slower, which still yields exact totals since
+            // the kernel counters are cumulative.
             let pump = Arc::clone(&app);
+            let pump_handle = handle.handle().clone();
+            let pump_wake = Arc::new(Notify::new());
+            let woken = Arc::clone(&pump_wake);
             tauri::async_runtime::spawn(async move {
                 loop {
                     let _ = pump.poll_traffic().await;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let watched = pump_handle.get_webview_window("main").is_some_and(|window| {
+                        window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+                    });
+                    let interval = Duration::from_secs(if watched { 1 } else { 5 });
+                    tokio::select! {
+                        () = tokio::time::sleep(interval) => {}
+                        () = woken.notified() => {}
+                    }
                 }
             });
 
@@ -515,16 +550,6 @@ pub fn run() {
                 install_tray(handle.handle())?;
             }
 
-            if startup.start_minimized
-                && let Some(window) = handle.get_webview_window("main")
-            {
-                if startup.show_tray_icon {
-                    hide_main(&window.as_ref().window());
-                } else {
-                    let _ = window.minimize();
-                }
-            }
-
             // "Connect on launch" only fires when there is a node to reconnect
             // to; a fresh install should land on the connection page instead of
             // failing at startup.
@@ -534,8 +559,19 @@ pub fn run() {
                 app,
                 quit_stage: AtomicU8::new(0),
                 updating: AtomicBool::new(false),
+                pump_wake,
+                window_state: Mutex::new(None),
                 _instance: instance,
             });
+            // A silent start to the tray never builds a webview; the first
+            // "show" creates it.
+            if startup.start_minimized && startup.show_tray_icon {
+                park_shell(handle.handle());
+            } else if startup.start_minimized {
+                create_main(handle.handle(), false)?.minimize()?;
+            } else {
+                create_main(handle.handle(), true)?;
+            }
             if auto_connect {
                 tauri::async_runtime::spawn(async move {
                     let remembered = app_for_launch.remembered_profile();
@@ -570,13 +606,24 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label() == "main"
-                && let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
                 && let Some(shell) = window.app_handle().try_state::<Shell>()
                 && shell.app.settings().startup.close_to_tray
                 && window.app_handle().tray_by_id("main").is_some()
             {
-                api.prevent_close();
-                hide_main(window);
+                if let (Ok(position), Ok(size), Ok(scale)) =
+                    (window.outer_position(), window.inner_size(), window.scale_factor())
+                {
+                    let position = position.to_logical::<f64>(scale);
+                    let size = size.to_logical::<f64>(scale);
+                    *shell.window_state.lock().expect("window state") = Some(MainWindowState {
+                        x: position.x, y: position.y, width: size.width, height: size.height,
+                        maximized: window.is_maximized().unwrap_or(false),
+                    });
+                }
+                // Let the close proceed: the webview is destroyed and the
+                // resulting "last window closed" exit request is declined below.
+                park_shell(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -628,7 +675,17 @@ pub fn run() {
         .build(context)
         .expect("error while building v2rayR")
         .run(|handle, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
+                show_main(handle);
+                return;
+            }
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // `code == None` only means the last window went away.
+                if code.is_none() && PARKED.load(Ordering::Acquire) {
+                    api.prevent_exit();
+                    return;
+                }
                 let Some(shell) = handle.try_state::<Shell>() else { return };
                 if shell.quit_stage.load(Ordering::Acquire) == 2 { return; }
                 api.prevent_exit();
@@ -638,19 +695,18 @@ pub fn run() {
                 let app = Arc::clone(&shell.app);
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let result = app.disconnect().await;
-                    let Some(shell) = handle.try_state::<Shell>() else { return };
-                    match result {
-                        Ok(_) => {
-                            shell.quit_stage.store(2, Ordering::Release);
-                            handle.exit(0);
-                        }
-                        Err(problem) => {
-                            shell.quit_stage.store(0, Ordering::Release);
-                            tracing::warn!(?problem, "cannot quit before restoring system proxy");
-                            show_main(&handle);
-                        }
+                    // disconnect contains synchronous platform calls. Run it on a
+                    // blocking worker so the deadline remains enforceable.
+                    let cleanup = tauri::async_runtime::spawn_blocking(move || {
+                        tauri::async_runtime::block_on(app.disconnect())
+                    });
+                    match tokio::time::timeout(Duration::from_secs(10), cleanup).await {
+                        Ok(Ok(Ok(_))) => {},
+                        result => tracing::warn!(?result, "exit cleanup delegated to core guardian"),
                     }
+                    let Some(shell) = handle.try_state::<Shell>() else { return };
+                    shell.quit_stage.store(2, Ordering::Release);
+                    handle.exit(0);
                 });
             }
         });
@@ -659,13 +715,17 @@ pub fn run() {
 
 /// Bring the already-running window to the front.
 ///
-/// macOS gives us `activate`; elsewhere there is no portable answer, so this is
-/// best effort and the second launch exits quietly either way.
+/// macOS gives us `reopen` (which rebuilds the window when the app is parked
+/// in the tray) and `activate`; elsewhere there is no portable answer, so this
+/// is best effort and the second launch exits quietly either way.
 fn activate_running_instance() {
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", "tell application \"v2rayR\" to activate"])
+            .args([
+                "-e", "tell application \"v2rayR\" to reopen",
+                "-e", "tell application \"v2rayR\" to activate",
+            ])
             .status();
     }
 }
@@ -752,7 +812,7 @@ fn install_tray(handle: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_main(&tray.app_handle());
+                show_main(tray.app_handle());
             }
         })
         .build(handle)?;
@@ -763,34 +823,78 @@ fn install_tray(handle: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn hide_main(window: &tauri::Window) {
-    if let Err(error) = window.hide() {
-        tracing::warn!(%error, "could not hide the main window");
-        return;
-    }
+/// Switch to tray-only mode. The caller lets the main window close (or never
+/// opens one); the proxy session keeps running in the shell process.
+fn park_shell(handle: &AppHandle) {
+    PARKED.store(true, Ordering::Release);
     #[cfg(target_os = "macos")]
-    if let Err(error) = window.app_handle().set_dock_visibility(false) {
+    if let Err(error) = handle.set_dock_visibility(false) {
         tracing::warn!(%error, "could not hide the Dock icon");
     }
-    #[cfg(windows)]
-    if let Err(error) = window.set_skip_taskbar(true) {
-        tracing::warn!(%error, "could not hide the taskbar button");
+    #[cfg(not(target_os = "macos"))]
+    let _ = handle;
+}
+
+/// Build the main window from its `tauri.conf.json` entry. With `reveal` it
+/// stays hidden until the page has loaded, so reopening from the tray never
+/// shows an empty frame.
+fn create_main(handle: &AppHandle, reveal: bool) -> tauri::Result<tauri::WebviewWindow> {
+    let mut config = handle
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .ok_or(tauri::Error::WindowNotFound)?;
+    let saved = handle.try_state::<Shell>()
+        .and_then(|shell| *shell.window_state.lock().expect("window state"));
+    if saved.is_some() {
+        config.center = false;
     }
+    let mut builder = WebviewWindowBuilder::from_config(handle, &config)?;
+    if let Some(saved) = saved {
+        builder = builder.position(saved.x, saved.y)
+            .inner_size(saved.width, saved.height).maximized(saved.maximized);
+    }
+    if reveal {
+        builder = builder.visible(false).on_page_load(|window, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
+    }
+    let window = builder.build()?;
+    PARKED.store(false, Ordering::Release);
+    #[cfg(target_os = "macos")]
+    if let Err(error) = handle.set_dock_visibility(true) {
+        tracing::warn!(%error, "could not restore the Dock icon");
+    }
+    if reveal {
+        // A page that never reports "finished" must not leave an invisible window.
+        let late = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if !late.is_visible().unwrap_or(true) {
+                let _ = late.show();
+            }
+        });
+    }
+    Ok(window)
 }
 
 fn show_main(handle: &AppHandle) {
     if let Some(window) = handle.get_webview_window("main") {
-        #[cfg(target_os = "macos")]
-        if let Err(error) = handle.set_dock_visibility(true) {
-            tracing::warn!(%error, "could not restore the Dock icon");
-        }
-        #[cfg(windows)]
-        if let Err(error) = window.set_skip_taskbar(false) {
-            tracing::warn!(%error, "could not restore the taskbar button");
-        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    } else if let Err(error) = create_main(handle, true) {
+        tracing::warn!(%error, "could not open the main window");
+        return;
+    }
+    if let Some(shell) = handle.try_state::<Shell>() {
+        shell.pump_wake.notify_one();
     }
 }
 

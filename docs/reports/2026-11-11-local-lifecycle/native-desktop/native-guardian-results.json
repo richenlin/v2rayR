@@ -1,0 +1,44 @@
+{
+  "executable": "/Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-desktop",
+  "sha256": "1fa29b31581f2ce46517673cecc8038649aa421131e07aa58c5369460ad0da05",
+  "cases": [
+    {
+      "case": "lease-close",
+      "result": "PASS",
+      "cleanupSeconds": 0.314,
+      "guardianPid": 49162,
+      "corePid": 49163,
+      "processes": "  PID  PPID  PGID STAT COMMAND\n49162 48838 49162 Ss   /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-desktop --internal-core-guardian /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-7_kaoygh/takeover.json /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-7_kaoygh/config.json\n49163 49162 49162 S    /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-7_kaoygh/config.json\n",
+      "journalRemoved": true
+    },
+    {
+      "case": "parent-sigkill",
+      "result": "PASS",
+      "cleanupSeconds": 0.342,
+      "guardianPid": 49209,
+      "corePid": 49210,
+      "processes": "  PID  PPID  PGID STAT COMMAND\n49209 49208 49209 Ss   /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-desktop --internal-core-guardian /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-ghljgqbp/takeover.json /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-ghljgqbp/config.json\n49210 49209 49209 S    /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-ghljgqbp/config.json\n",
+      "journalRemoved": true
+    },
+    {
+      "case": "hup-int-term",
+      "result": "PASS",
+      "cleanupSeconds": 0.671,
+      "guardianPid": 49246,
+      "corePid": 49248,
+      "processes": "  PID  PPID  PGID STAT COMMAND\n49246 48838 49246 Ss   /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-desktop --internal-core-guardian /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-_ytpd_a1/takeover.json /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-_ytpd_a1/config.json\n49248 49246 49246 S    /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-_ytpd_a1/config.json\n",
+      "journalRemoved": true
+    },
+    {
+      "case": "core-exits-first",
+      "result": "PASS",
+      "cleanupSeconds": 0.004,
+      "guardianPid": 49301,
+      "corePid": 49302,
+      "processes": "  PID  PPID  PGID STAT COMMAND\n49301 48838 49301 Ss   /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-desktop --internal-core-guardian /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-d56f0kxe/takeover.json /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-d56f0kxe/config.json\n49302 49301 49301 S    /Volumes/ExternalSSD/Users/richen/Workspace/rust/v2rayR/apps/desktop/target/debug/v2rayr-core-sing-box run -c /var/folders/q7/btr_3bl94ml3jg4mkshx237h0000gn/T/v2rayr-native-d56f0kxe/config.json\n",
+      "journalRemoved": false
+    }
+  ],
+  "systemProxyUnchanged": true,
+  "scope": "real core + HTTP; native proxy restore with no owned slots; no OS proxy writes"
+}

@@ -38,10 +38,11 @@ pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
     root.insert("routing".into(), routing(plan));
     root.insert("dns".into(), dns(plan));
     root.insert("stats".into(), json!({}));
+    // An HTTP expvar endpoint the app polls with one kept-alive connection; the
+    // gRPC StatsService could only be read by spawning `xray api` every second.
     root.insert(
-        "api".into(),
-        json!({"tag": "v2rayr-stats", "listen": format!("127.0.0.1:{}", plan.api.port),
-            "services": ["StatsService"]}),
+        "metrics".into(),
+        json!({"tag": "v2rayr-metrics", "listen": format!("127.0.0.1:{}", plan.api.port)}),
     );
     root.insert(
         "policy".into(),
