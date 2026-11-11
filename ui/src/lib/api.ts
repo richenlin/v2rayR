@@ -408,7 +408,7 @@ function seedState(): MockState {
       { id: "r2", kind: "geosite", value: "category-ads-all", action: "block", enabled: true, position: 1 },
     ],
     logs: [
-      { seq: 1, ts: Date.now() - 90_000, level: "info", target: "app", message: "v2rayR 0.1.0 预览环境已就绪" },
+      { seq: 1, ts: Date.now() - 90_000, level: "info", target: "app", message: `v2rayR ${import.meta.env.VITE_APP_VERSION} 预览环境已就绪` },
       { seq: 2, ts: Date.now() - 60_000, level: "info", target: "cores", message: "检测到 sing-box 1.11.3 / Xray 1.8.24" },
       { seq: 3, ts: Date.now() - 30_000, level: "warn", target: "subscription", message: "「自建节点」上次更新失败，保留旧节点" },
     ],
@@ -523,7 +523,7 @@ function snapshot(): AppSnapshot {
   const active = state.nodes.find((node) => node.id === state.connection.profileId);
   return {
     version: {
-      appVersion: "0.1.0",
+      appVersion: import.meta.env.VITE_APP_VERSION,
       apiVersion: 1,
       settingsSchema: 1,
       dbSchema: 1,

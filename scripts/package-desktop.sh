@@ -43,7 +43,9 @@ if [[ ! -e "$tauri" ]]; then
 fi
 
 # macOS system Bash treats an empty array as unbound under set -u.
-args=(build)
+# The bundle version is the root workspace version, not tauri.conf.json.
+version=$(bash "$root/scripts/app-version.sh")
+args=(build --config "{\"version\":\"$version\"}")
 if (( bundle == 0 )); then
   args+=(--no-bundle)
 fi

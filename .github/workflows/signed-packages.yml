@@ -67,6 +67,7 @@ jobs:
           UPDATER_ENDPOINT: ${{ inputs.updater_endpoint }}
           UPDATER_PUBLIC_KEY: ${{ vars.V2RAYR_UPDATER_PUBLIC_KEY }}
         run: |
+          export APP_VERSION=$(bash scripts/app-version.sh)
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs';
           const endpoint = new URL(process.env.UPDATER_ENDPOINT);
@@ -79,8 +80,10 @@ jobs:
             if (!certificateThumbprint) throw Error('Missing Windows signing certificate');
             bundle.windows = { certificateThumbprint, digestAlgorithm: 'sha256', timestampUrl: 'http://timestamp.digicert.com', tsp: true };
           }
+          const version = process.env.APP_VERSION?.trim();
+          if (!version) throw Error('Missing workspace version');
           writeFileSync('apps/desktop/tauri.signed.generated.json', JSON.stringify({
-            bundle, plugins: { updater: { pubkey, endpoints: [endpoint.href], requireSignedVersion: true } }
+            version, bundle, plugins: { updater: { pubkey, endpoints: [endpoint.href], requireSignedVersion: true } }
           }));
           JS
       - run: pnpm --dir ui install --frozen-lockfile
@@ -115,7 +118,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cargo build --locked --release -p v2rayr-helper
-          version=$(node -p 'require("./apps/desktop/tauri.conf.json").version')
+          version=$(bash scripts/app-version.sh)
           mkdir -p apps/desktop/target/release/bundle/helper
           helper=v2rayr-helper
           if [ "$RUNNER_OS" = Windows ]; then helper=v2rayr-helper.exe; fi

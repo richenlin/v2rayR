@@ -48,6 +48,6 @@ jobs:
           BUILD_SHA: ${{ steps.build.outputs.sha }}
           BUILD_URL: ${{ steps.build.outputs.url }}
         run: |
-          gh api "repos/$GH_REPO/contents/apps/desktop/tauri.conf.json?ref=$BUILD_SHA" --jq .content | base64 -d > source-config.json
-          version=$(node -p 'require("./source-config.json").version')
+          gh api "repos/$GH_REPO/contents/Cargo.toml?ref=$BUILD_SHA" --jq .content | base64 -d > source-Cargo.toml
+          version=$(bash scripts/app-version.sh source-Cargo.toml)
           bash scripts/publish-ci-release.sh release-artifacts "$BUILD_SHA" "$version" "$BUILD_URL"

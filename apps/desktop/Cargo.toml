@@ -14,6 +14,9 @@ repository.workspace = true
 [workspace]
 
 [workspace.package]
+# Cargo requires a version on this isolated workspace. The product version is
+# the root Cargo.toml workspace.package.version, applied by build.rs and the
+# packaging script.
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"

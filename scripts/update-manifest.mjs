@@ -1,4 +1,5 @@
 // Build Tauri's static update manifest from the signed payloads, without publishing.
+import { execFileSync } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
@@ -8,7 +9,7 @@ const url = new URL(base.endsWith("/") ? base : base + "/");
 if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
   throw Error("Use a credential-free HTTPS asset base");
 }
-const { version } = JSON.parse(await readFile("apps/desktop/tauri.conf.json", "utf8"));
+const version = execFileSync("bash", ["scripts/app-version.sh"], { encoding: "utf8" }).trim();
 async function walk(path) {
   const entries = await readdir(path, { withFileTypes: true });
   return (await Promise.all(entries.map(entry => entry.isDirectory()

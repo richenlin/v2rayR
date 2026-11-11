@@ -15,7 +15,7 @@ export function Rail() {
   const navigate = useStore((state) => state.navigate);
   const themeMode = useStore((state) => state.themeMode);
   const toggleTheme = useStore((state) => state.toggleTheme);
-  const version = useStore((state) => state.snapshot?.version.appVersion ?? "0.1.0");
+  const version = useStore((state) => state.snapshot?.version.appVersion ?? import.meta.env.VITE_APP_VERSION);
 
   return (
     <aside className="rail" aria-label={t("nav.workspace")}>

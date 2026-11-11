@@ -6,7 +6,7 @@
 
 面向 macOS、Windows 和 Linux 的代理客户端。Rust 负责节点、订阅、内核和系统接管，React 负责工作台。界面默认中文，也提供英文；浅色与深色主题跟随系统，可以手动切换。
 
-A desktop and command-line proxy client. The workspace version is **0.1.0**. Signed installers are not published yet; build from source below.
+A desktop and command-line proxy client. The product version is `workspace.package.version` in the root `Cargo.toml`. Signed installers are not published yet; build from source below.
 
 连接状态、失败恢复和设置保存遵循三条约束：
 

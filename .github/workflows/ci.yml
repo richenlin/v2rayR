@@ -164,5 +164,5 @@ jobs:
           BUILD_SHA: ${{ github.sha }}
           BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          version=$(node -p 'require("./apps/desktop/tauri.conf.json").version')
+          version=$(bash scripts/app-version.sh)
           bash scripts/publish-ci-release.sh release-artifacts "$BUILD_SHA" "$version" "$BUILD_URL"

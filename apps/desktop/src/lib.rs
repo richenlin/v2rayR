@@ -465,7 +465,7 @@ pub fn run() {
             let events = Arc::new(TauriEvents {
                 handle: handle.handle().clone(),
             });
-            let mut options = AppOptions::new(env!("CARGO_PKG_VERSION")).with_events(events);
+            let mut options = AppOptions::new(env!("V2RAYR_VERSION")).with_events(events);
             if let Ok(executable) = std::env::current_exe()
                 && let Some(binaries) = executable.parent()
             {

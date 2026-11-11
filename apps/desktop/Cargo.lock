@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
@@ -4353,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4385,7 +4385,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hex",
@@ -4420,7 +4420,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -4432,7 +4432,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4451,7 +4451,7 @@ dependencies = [
 
 [[package]]
 name = "v2rayr-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
