@@ -143,3 +143,26 @@ jobs:
           name: v2rayR-${{ matrix.os }}
           if-no-files-found: error
           path: dist/*
+
+  release:
+    name: publish CI installers
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v2rayR-*
+          path: release-artifacts
+      - name: Publish verified installers as a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          version=$(node -p 'require("./apps/desktop/tauri.conf.json").version')
+          bash scripts/publish-ci-release.sh release-artifacts "$BUILD_SHA" "$version" "$BUILD_URL"
