@@ -42,7 +42,7 @@ for platform in ("macos-15", "windows-2022", "ubuntu-22.04"):
 PY
 notes="$work/notes.md"
 cat > "$notes" <<NOTES
-Installers built from commit `$commit`.
+Installers built from commit $commit.
 
 - macOS ARM64 DMG
 - Windows x64 MSI and NSIS setup
