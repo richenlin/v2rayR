@@ -751,9 +751,26 @@ impl App {
                 }
             }
             Err(error) => {
-                self.logs
-                    .warn("takeover", format!("接管快照损坏，已忽略: {error}"));
-                let _ = std::fs::remove_file(&path);
+                // Never delete the only recovery clue: a corrupt journal is moved
+                // aside (same bytes, discoverable path) and the failure is logged.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis())
+                    .unwrap_or_default();
+                let preserved = path.with_file_name(format!("takeover.corrupt-{stamp}.json"));
+                match std::fs::rename(&path, &preserved) {
+                    Ok(()) => self.logs.warn(
+                        "takeover",
+                        format!(
+                            "接管快照损坏，已保留为 {} 以便排查: {error}",
+                            preserved.display()
+                        ),
+                    ),
+                    Err(rename) => self.logs.warn(
+                        "takeover",
+                        format!("接管快照损坏且无法留存（{rename}），保持原文件不动: {error}"),
+                    ),
+                }
             }
         }
     }
@@ -967,5 +984,56 @@ pub(crate) mod test_support {
         let paths = AppPaths::new(root);
         let options = AppOptions::new("0.0.0-test").with_proxy(Arc::new(NoopProxy));
         App::open(paths, options).expect("open test app")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::NoopProxy;
+
+    #[test]
+    fn a_corrupt_takeover_journal_is_preserved_instead_of_deleted() {
+        let root = std::env::temp_dir().join(format!(
+            "v2rayr-journal-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = v2rayr_platform::AppPaths::new(root);
+        paths.ensure().expect("paths");
+        std::fs::create_dir_all(paths.runtime_dir()).expect("run dir");
+        std::fs::write(paths.takeover_snapshot(), b"{\"garbage\":").expect("seed journal");
+
+        let app = App::open(
+            paths.clone(),
+            AppOptions::new("0.0.0-test").with_proxy(Arc::new(NoopProxy)),
+        )
+        .expect("open");
+
+        let entries: Vec<String> = std::fs::read_dir(paths.runtime_dir())
+            .expect("read run dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            !entries.iter().any(|name| name == "takeover.json"),
+            "the unreadable journal must not stay in place: {entries:?}"
+        );
+        let preserved = entries
+            .iter()
+            .find(|name| name.starts_with("takeover.corrupt-"))
+            .unwrap_or_else(|| panic!("corrupt journal must be preserved: {entries:?}"));
+        let kept = std::fs::read_to_string(paths.runtime_dir().join(preserved)).expect("read kept");
+        assert!(
+            kept.contains("garbage"),
+            "preserved journal must keep the original bytes: {kept}"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(paths.root());
     }
 }
