@@ -5,7 +5,7 @@
 //! partially broken paste reports per-line failures instead of failing whole.
 
 use uuid::Uuid;
-use v2rayr_domain::{Profile, parse_share_links};
+use v2rayr_domain::Profile;
 use v2rayr_ipc::{ImportFailure, ImportReport, Problem, SubscriptionView};
 use v2rayr_store::ProfileUpsert;
 
@@ -28,9 +28,24 @@ pub struct ImportSummary {
 
 impl App {
     pub fn import_text(&self, request: &ImportRequest) -> Result<ImportSummary, Problem> {
-        let outcome = parse_share_links(&request.text);
-        let preview = outcome.dedupe(v2rayr_domain::fingerprint::DEFAULT_SALT);
-        Ok(self.import_preview(preview, request.subscription_id, Some("links".to_owned())))
+        // Sniff the payload instead of assuming "one link per line": a Clash YAML
+        // or sing-box JSON file must import the same way a subscription body does.
+        // An empty paste keeps the old per-line behaviour so the UI still shows a
+        // single "empty input" failure row instead of a hard error.
+        let (format, preview) = if request.text.trim().is_empty() {
+            (
+                v2rayr_domain::SubscriptionFormat::Links,
+                v2rayr_domain::parse_share_links(&request.text)
+                    .dedupe(v2rayr_domain::fingerprint::DEFAULT_SALT),
+            )
+        } else {
+            v2rayr_engine::preview_from_body(&request.text).map_err(crate::error::from_engine)?
+        };
+        Ok(self.import_preview(
+            preview,
+            request.subscription_id,
+            Some(format.as_str().to_owned()),
+        ))
     }
 
     /// Store an already-parsed preview (used by subscription refresh too).
@@ -261,6 +276,69 @@ mod tests {
         let subscriptions = app.subscriptions();
         assert_eq!(subscriptions.len(), 1);
         assert_eq!(subscriptions[0].url_host, "sub.example.com");
+    }
+
+    #[test]
+    fn a_clash_yaml_file_imports_like_a_subscription() {
+        let app = temp_app();
+        let yaml = "proxies:\n  - name: clash-vless\n    type: vless\n    server: 203.0.113.40\n    port: 443\n    uuid: 11111111-2222-3333-4444-555555555555\n    tls: true\n    servername: clash.example.com\n";
+        let summary = app
+            .import_text(&ImportRequest {
+                text: yaml.into(),
+                subscription_id: None,
+            })
+            .expect("import clash");
+        assert_eq!(
+            summary.report.added.len(),
+            1,
+            "failures: {:?}",
+            summary.report.failures
+        );
+        assert_eq!(summary.report.detected_format.as_deref(), Some("clash"));
+        let node = app.nodes().into_iter().next().expect("node");
+        assert_eq!(node.address, "203.0.113.40");
+        assert!(node.tls);
+    }
+
+    #[test]
+    fn a_singbox_json_file_imports_like_a_subscription() {
+        let app = temp_app();
+        let json = r#"{"outbounds":[{"type":"vless","tag":"sb","server":"203.0.113.41","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","tls":{"enabled":true,"server_name":"sb.example.com"}}]}"#;
+        let summary = app
+            .import_text(&ImportRequest {
+                text: json.into(),
+                subscription_id: None,
+            })
+            .expect("import sing-box");
+        assert_eq!(
+            summary.report.added.len(),
+            1,
+            "failures: {:?}",
+            summary.report.failures
+        );
+        assert_eq!(summary.report.detected_format.as_deref(), Some("sing-box"));
+    }
+
+    #[test]
+    fn an_exported_link_re_imports_as_a_duplicate() {
+        let app = temp_app();
+        let summary = app
+            .import_text(&ImportRequest {
+                text: "vless://11111111-1111-1111-1111-111111111111@a.example.com:443?type=tcp&security=tls&sni=a.example.com#Tokyo".into(),
+                subscription_id: None,
+            })
+            .expect("import");
+        let id = summary.report.added[0].id;
+        let link = app.share_link(id).expect("export");
+        let again = app
+            .import_text(&ImportRequest {
+                text: link.clone(),
+                subscription_id: None,
+            })
+            .expect("re-import");
+        assert_eq!(again.report.added.len(), 0, "re-imported: {link}");
+        assert_eq!(again.report.duplicates, 1);
+        assert_eq!(app.nodes().len(), 1);
     }
 
     #[test]

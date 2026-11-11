@@ -140,10 +140,9 @@ pub async fn download_core(
             && parsed.username().is_empty()
             && parsed.password().is_none()
     }) {
-        return Err(EngineError::StartupFailed {
-            core: kind.as_str(),
-            message: "内核下载地址必须是无账号密码的 HTTPS 地址".into(),
-        });
+        return Err(EngineError::InvalidRequest(
+            "内核下载地址必须是无账号密码的 HTTPS 地址".into(),
+        ));
     }
     let expected = release
         .as_ref()
@@ -151,9 +150,8 @@ pub async fn download_core(
         .and_then(|release| release.sha256)
         .or(sha256)
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| EngineError::StartupFailed {
-            core: kind.as_str(),
-            message: "自定义内核地址必须提供有效的 SHA-256".into(),
+        .ok_or_else(|| {
+            EngineError::InvalidRequest("自定义内核地址必须提供有效的 SHA-256".into())
         })?;
     std::fs::create_dir_all(dir)?;
     let stage = tempfile::tempdir_in(dir)?;
@@ -533,5 +531,28 @@ mod tests {
             let mode = std::fs::metadata(&file).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o755);
         }
+    }
+
+    #[tokio::test]
+    async fn a_custom_url_without_a_digest_is_a_request_error() {
+        let dir = tempfile::tempdir().expect("dir");
+        let error = download_core(
+            CoreKind::Xray,
+            dir.path(),
+            Some("https://example.invalid/xray.zip"),
+            None,
+        )
+        .await
+        .expect_err("a custom URL without a digest must be refused");
+        assert_eq!(error.code(), v2rayr_domain::ErrorCode::InvalidValue);
+        assert!(
+            !error.to_string().contains("exited during startup"),
+            "a bad request must not be reported as a kernel crash: {error}"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("dir").count(),
+            0,
+            "nothing may be written when the request is refused"
+        );
     }
 }

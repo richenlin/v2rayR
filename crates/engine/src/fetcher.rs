@@ -40,6 +40,12 @@ impl Fetcher {
             .connect_timeout(Duration::from_secs(10))
             .user_agent(user_agent.clone())
             .redirect(reqwest::redirect::Policy::limited(5))
+            // Subscription fetches are routed by the app itself, never by the
+            // ambient `HTTP_PROXY`/`HTTPS_PROXY` a user happens to export: on
+            // this very machine such a variable pointed at an idle port, so the
+            // update failed and even a loopback fetch inside the tests was
+            // detoured through that dead proxy.
+            .no_proxy()
             .build()
             .unwrap_or_default();
         Self {
@@ -77,66 +83,7 @@ impl Fetcher {
             .await
             .map_err(|error| self.map_request_error(error))?;
 
-        let sniffed = sniff_subscription(&body);
-        let format = sniffed.format;
-        let preview = match &sniffed.payload {
-            Payload::Links(_) => parse_share_links(&body).dedupe(b"subscription"),
-            Payload::Sip008(value) => ImportPreview {
-                profiles: parse_sip008(value)?,
-                ..ImportPreview::default()
-            },
-            Payload::Clash { yaml } => {
-                let imported = v2rayr_domain::clash::parse_clash_config(yaml).map_err(|error| {
-                    EngineError::UnsupportedPayload(format!(
-                        "Clash 订阅解析失败: {}",
-                        error.code().as_str()
-                    ))
-                })?;
-                ImportPreview {
-                    failures: imported
-                        .skipped
-                        .into_iter()
-                        .map(|reason| v2rayr_domain::LinkFailure {
-                            source: "clash".to_owned(),
-                            error: v2rayr_domain::DomainError::new(
-                                v2rayr_domain::ErrorCode::UnsupportedProtocol,
-                            )
-                            .with_detail(reason),
-                        })
-                        .collect(),
-                    profiles: imported.profiles,
-                    ..ImportPreview::default()
-                }
-            }
-            Payload::SingBox(value) => {
-                let imported = v2rayr_domain::singbox_import::parse_singbox_config(value).map_err(
-                    |error| {
-                        EngineError::UnsupportedPayload(format!(
-                            "sing-box 订阅解析失败: {}",
-                            error.code().as_str()
-                        ))
-                    },
-                )?;
-                ImportPreview {
-                    failures: imported
-                        .skipped
-                        .into_iter()
-                        .map(|reason| v2rayr_domain::LinkFailure {
-                            source: "sing-box".to_owned(),
-                            error: v2rayr_domain::DomainError::new(
-                                v2rayr_domain::ErrorCode::UnsupportedProtocol,
-                            )
-                            .with_detail(reason),
-                        })
-                        .collect(),
-                    profiles: imported.profiles,
-                    ..ImportPreview::default()
-                }
-            }
-            Payload::Unknown { reason } => {
-                return Err(EngineError::UnsupportedPayload(reason.clone()));
-            }
-        };
+        let (format, preview) = preview_from_body(&body)?;
 
         // Refusing an empty import is load bearing: a refresh merges the incoming
         // nodes into the stored ones, and an empty "successful" refresh would
@@ -174,6 +121,73 @@ impl Fetcher {
 }
 
 /// SIP008 is plain JSON, so it can be imported without a YAML dependency.
+/// Sniffs a payload body and turns it into an import preview.
+///
+/// Shared by the network refresh path and by the local "paste text / import
+/// file" path, so a Clash YAML or sing-box JSON file imports exactly like the
+/// same payload served by a subscription endpoint.
+pub fn preview_from_body(body: &str) -> Result<(SubscriptionFormat, ImportPreview), EngineError> {
+    let sniffed = sniff_subscription(body);
+    let preview = match &sniffed.payload {
+        Payload::Links(_) => parse_share_links(body).dedupe(b"subscription"),
+        Payload::Sip008(value) => ImportPreview {
+            profiles: parse_sip008(value)?,
+            ..ImportPreview::default()
+        },
+        Payload::Clash { yaml } => {
+            let imported = v2rayr_domain::clash::parse_clash_config(yaml).map_err(|error| {
+                EngineError::UnsupportedPayload(format!(
+                    "Clash 配置解析失败: {}",
+                    error.code().as_str()
+                ))
+            })?;
+            ImportPreview {
+                failures: imported
+                    .skipped
+                    .into_iter()
+                    .map(|reason| v2rayr_domain::LinkFailure {
+                        source: "clash".to_owned(),
+                        error: v2rayr_domain::DomainError::new(
+                            v2rayr_domain::ErrorCode::UnsupportedProtocol,
+                        )
+                        .with_detail(reason),
+                    })
+                    .collect(),
+                profiles: imported.profiles,
+                ..ImportPreview::default()
+            }
+        }
+        Payload::SingBox(value) => {
+            let imported =
+                v2rayr_domain::singbox_import::parse_singbox_config(value).map_err(|error| {
+                    EngineError::UnsupportedPayload(format!(
+                        "sing-box 配置解析失败: {}",
+                        error.code().as_str()
+                    ))
+                })?;
+            ImportPreview {
+                failures: imported
+                    .skipped
+                    .into_iter()
+                    .map(|reason| v2rayr_domain::LinkFailure {
+                        source: "sing-box".to_owned(),
+                        error: v2rayr_domain::DomainError::new(
+                            v2rayr_domain::ErrorCode::UnsupportedProtocol,
+                        )
+                        .with_detail(reason),
+                    })
+                    .collect(),
+                profiles: imported.profiles,
+                ..ImportPreview::default()
+            }
+        }
+        Payload::Unknown { reason } => {
+            return Err(EngineError::UnsupportedPayload(reason.clone()));
+        }
+    };
+    Ok((sniffed.format, preview))
+}
+
 fn parse_sip008(value: &Value) -> Result<Vec<v2rayr_domain::Profile>, EngineError> {
     let servers = value
         .get("servers")

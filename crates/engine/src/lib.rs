@@ -21,7 +21,7 @@ pub use check::{CheckOutcome, check_config};
 pub use clash::{ClashClient, ClashSample};
 pub use cores::{CoreBinaries, CoreProbe};
 pub use dist::{CoreRelease, default_release, download_core};
-pub use fetcher::{FetchedSubscription, Fetcher};
+pub use fetcher::{FetchedSubscription, Fetcher, preview_from_body};
 pub use latency::{LatencyProbe, LatencyTarget, tcp_latency};
 pub use process::{KernelProcess, LaunchSpec};
 
@@ -41,6 +41,10 @@ pub enum EngineError {
     ControlApi(String),
     #[error("network: {0}")]
     Network(String),
+    /// The caller asked for something invalid (bad download URL, missing digest).
+    /// This is a request problem, not a kernel failure.
+    #[error("{0}")]
+    InvalidRequest(String),
     #[error("the subscription returned an unsupported payload: {0}")]
     UnsupportedPayload(String),
     #[error("timeout after {0:?}")]
@@ -57,6 +61,7 @@ impl EngineError {
             Self::ControlApi(_) => ErrorCode::CoreFailed,
             Self::Network(_) => ErrorCode::NetworkError,
             Self::UnsupportedPayload(_) => ErrorCode::UnsupportedFormat,
+            Self::InvalidRequest(_) => ErrorCode::InvalidValue,
             Self::Timeout(_) => ErrorCode::NetworkError,
         }
     }
