@@ -12,6 +12,7 @@ pub mod importer;
 pub mod latency;
 pub mod logging;
 mod pac_rules;
+mod routing;
 mod rules;
 pub use rules::inspect_rule_applications;
 pub mod session;
@@ -38,6 +39,13 @@ use v2rayr_store::{
 
 use crate::logging::LogBus;
 use crate::session::SessionRuntime;
+
+/// Process entry for the detached core guardian. Returns immediately unless
+/// this process was started with `--internal-core-guardian`.
+pub fn dispatch_core_guardian() {
+    v2rayr_engine::guardian::dispatch();
+}
+
 use crate::settings::{CURRENT_SCHEMA, LoadedSettings, write_atomic};
 
 /// How a UI receives state changes. The desktop shell forwards these to Tauri
@@ -561,50 +569,63 @@ impl App {
         if self.check_kernel_exit().await {
             return None;
         }
-        let (port, secret, xray) = {
-            let session = self.session.lock().expect("session");
+        let (port, secret, probe) = {
+            let mut session = self.session.lock().expect("session");
             if session.phase() != v2rayr_ipc::ConnectionPhase::Connected {
                 return None;
             }
             (
                 session.api_port()?,
                 session.api_secret().to_owned(),
-                session.traffic_program.clone(),
+                session.traffic_probe.take()?,
             )
         };
-        let counters = if let Some(program) = xray {
-            v2rayr_engine::traffic::xray_totals(&program, port).await
-        } else {
-            v2rayr_engine::ClashClient::new(port, secret.clone())
-                .traffic_totals()
-                .await
-        };
-        let counters = match counters {
-            Ok(counters) => counters,
-            Err(error) => {
-                self.logs.warn("traffic", format!("读取流量失败: {error}"));
-                return None;
-            }
-        };
+        let counters = probe.totals().await;
         let at = std::time::Instant::now();
         let now = Utc::now();
-        let _guard = self.op_lock.try_lock().ok()?;
-        let (view, (down, up)) = {
+        let guard = self.op_lock.try_lock();
+        let recorded = {
             let mut session = self.session.lock().expect("session");
-            if session.phase() != v2rayr_ipc::ConnectionPhase::Connected
-                || session.api_port() != Some(port)
-                || session.api_secret() != secret
-            {
-                return None;
+            let current = session.phase() == v2rayr_ipc::ConnectionPhase::Connected
+                && session.api_port() == Some(port)
+                && session.api_secret() == secret;
+            if current {
+                session.traffic_probe = Some(probe);
             }
-            let delta = session.record_counters(at, now.timestamp_millis(), counters)?;
-            (session.traffic_view(), delta)
+            if guard.is_err() || !current {
+                None
+            } else {
+                match counters {
+                    Ok(counters) => session
+                        .record_counters(at, now.timestamp_millis(), counters)
+                        .map(|delta| {
+                            let prune = session.traffic_pruned_at.is_none_or(|seen| {
+                                seen.elapsed() >= std::time::Duration::from_secs(60)
+                            });
+                            if prune {
+                                session.traffic_pruned_at = Some(at);
+                            }
+                            (session.traffic_view(), delta, prune)
+                        }),
+                    Err(error) => {
+                        if !session.traffic_warned {
+                            session.traffic_warned = true;
+                            self.logs.warn("traffic", format!("读取流量失败: {error}"));
+                        }
+                        None
+                    }
+                }
+            }
         };
+        let (view, (down, up), prune) = recorded?;
         {
             let db = self.db.lock().expect("db");
-            let _ = db.add_totals(down, up);
-            let _ = db.record_traffic(now, down, up);
-            let _ = db.prune_traffic(now - chrono::Duration::hours(2));
+            let _ = db.record_tick(
+                now,
+                down,
+                up,
+                prune.then_some(now - chrono::Duration::hours(1)),
+            );
         }
         self.events.emit(EventName::TRAFFIC, json!(view));
         Some(view)
