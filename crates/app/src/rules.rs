@@ -470,6 +470,7 @@ mod tests {
         );
         assert!(app.add_rule("ip-cidr", "2001:db8::/32", "direct").is_ok());
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_same_name_bundles_and_helpers_have_independent_identities() {
         use super::inspect_rule_applications;
