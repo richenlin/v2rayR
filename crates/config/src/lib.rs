@@ -10,6 +10,7 @@ pub mod application_ingress;
 pub mod capability;
 pub mod mihomo;
 pub mod plan;
+pub mod routing;
 pub mod singbox;
 pub mod validate;
 pub mod xray;

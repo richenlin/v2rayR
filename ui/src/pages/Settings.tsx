@@ -81,6 +81,7 @@ function ruleKindLabel(t: ReturnType<typeof useT>, kind: string) {
 function RulesEditor() {
   const t = useT();
   const rules = useStore((state) => state.rules);
+  const connection = useStore((state) => state.snapshot?.connection);
   const toggleRule = useStore((state) => state.toggleRule);
   const removeRule = useStore((state) => state.removeRule);
   const [editor, setEditor] = useState<RuleView | "new" | null>(null);
@@ -101,7 +102,9 @@ function RulesEditor() {
           {rules.map((rule: RuleView) => (
             <li key={rule.id} className="rules-row" data-disabled={!rule.enabled || undefined}>
               <Toggle checked={rule.enabled} label={t("settings.rules.enabled")} onChange={(checked) => void toggleRule(rule.id, checked)} />
-              <span className="rules-kind">{ruleKindLabel(t, rule.kind)}</span>
+              <span className="rules-kind">{ruleKindLabel(t, rule.kind)}
+                {rule.enabled && (rule.applications?.length || rule.kind === "process") && (connection?.mode !== "tun" || connection.policy !== "rule" || rule.kind === "process") ? <span className="field-hint">{t("settings.rules.unsupported")}</span> : null}
+              </span>
               <span className="mono rules-value">{rule.value}</span>
               <span className="mono rules-value" aria-label={t("settings.rules.application")} title={rule.applications?.map((app) => app.path).join("\n")}>
                 {rule.applications?.length ? rule.applications.map((app) => applicationName(app.path)).join(", ") : "*"}
@@ -464,23 +467,7 @@ export function SettingsPage() {
                 />
               </Field>
             ) : null}
-            {matches("settings.bypassLocal", "settings.bypassLocal.hint") ? (
-              <Field label={t("settings.bypassLocal")} hint={t("settings.bypassLocal.hint")} inline>
-                <Toggle checked={value.bypassLocal} label={t("settings.bypassLocal")} onChange={(checked) => patch("inbound", { bypassLocal: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.bypassExtra", "settings.bypassExtra.hint") ? (
-              <Field label={t("settings.bypassExtra")} hint={t("settings.bypassExtra.hint")} htmlFor="bypass-extra">
-                <textarea
-                  id="bypass-extra"
-                  className="control control-mono"
-                  value={value.bypassExtra}
-                  placeholder={"*.company.internal\n10.20.0.0/16"}
-                  onChange={(event) => patch("inbound", { bypassExtra: event.target.value })}
-                />
-              </Field>
-            ) : null}
-
+            <p className="field-hint">{t("settings.rules.bypassLegacy")}</p>
             {matches("settings.allowLan", "settings.allowLan.hint", "settings.lanBind") ? (
               <Field label={t("settings.allowLan")} hint={t("settings.allowLan.hint")} inline>
                 <Toggle checked={value.allowLan} label={t("settings.allowLan")} onChange={(checked) => patch("inbound", { allowLan: checked })} />
@@ -522,16 +509,7 @@ export function SettingsPage() {
         const value = draftOf("routing");
         return (
           <>
-            {matches("settings.ruleSet", "settings.ruleSet.hint") ? (
-              <Field label={t("settings.ruleSet")} hint={t("settings.ruleSet.hint")} inline>
-                <Toggle checked={value.ruleSetEnabled} label={t("settings.ruleSet")} onChange={(checked) => patch("routing", { ruleSetEnabled: checked })} />
-              </Field>
-            ) : null}
-            {matches("settings.blockAds") ? (
-              <Field label={t("settings.blockAds")} inline>
-                <Toggle checked={value.blockAds} label={t("settings.blockAds")} onChange={(checked) => patch("routing", { blockAds: checked })} />
-              </Field>
-            ) : null}
+            <p className="field-hint">{t("settings.rules.explicit")}</p>
             {matches("settings.dnsServers", "settings.dnsServers.hint") ? (
               <details open={Boolean(term || value.dnsServers.trim())}>
                 <summary className="field-label" style={{ cursor: "pointer", padding: "14px 0" }}>{t("settings.customDns")}</summary>

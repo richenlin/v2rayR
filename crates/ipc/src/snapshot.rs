@@ -58,6 +58,10 @@ pub struct ConnectionState {
     pub mode: TakeoverMode,
     pub policy: RoutingPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_policy: Option<RoutingPolicy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routing_warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_remark: Option<String>,
@@ -91,6 +95,8 @@ impl Default for ConnectionState {
             phase: ConnectionPhase::Disconnected,
             mode: TakeoverMode::SystemProxy,
             policy: RoutingPolicy::Rule,
+            requested_policy: None,
+            routing_warnings: Vec::new(),
             profile_id: None,
             profile_remark: None,
             core: None,

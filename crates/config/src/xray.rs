@@ -71,7 +71,7 @@ fn log_level(level: &str) -> &str {
 
 fn sniffing(enabled: bool) -> Value {
     if enabled {
-        json!({"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false})
+        json!({"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true})
     } else {
         json!({"enabled": false})
     }
@@ -126,7 +126,7 @@ fn outbounds(plan: &SessionPlan) -> Value {
         json!({"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIP"}});
     let block = json!({"tag": "block", "protocol": "blackhole", "settings": {}});
     // Xray uses the first outbound as the default route.
-    if plan.policy == RoutingMode::Direct {
+    if plan.policy != RoutingMode::Global {
         json!([direct, proxy, block])
     } else {
         json!([proxy, direct, block])
@@ -395,14 +395,6 @@ fn reality_settings(tls: &TlsOptions, address: &str) -> Value {
 
 fn routing(plan: &SessionPlan) -> Value {
     let mut rules = Vec::new();
-    if plan.policy != RoutingMode::Direct {
-        rules.push(json!({
-            "type": "field",
-            "ip": ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
-            "outboundTag": "direct",
-        }));
-    }
-
     if plan.policy == RoutingMode::Rule {
         let custom_start = rules.len();
         for rule_set in &plan.rule_sets {
@@ -422,10 +414,28 @@ fn routing(plan: &SessionPlan) -> Value {
                     "domain": ["geosite:category-ads-all"],
                     "outboundTag": "block",
                 })),
-                RuleSetKind::Ads => {}
+                RuleSetKind::Ads | RuleSetKind::ReferenceOnly => {}
             }
         }
-        let custom = plan.rules.iter().filter_map(custom_rule);
+        let custom = crate::routing::batches(&plan.rules)
+            .into_iter()
+            .filter_map(|batch| {
+                let mut value = custom_rule(&batch[0])?;
+                if batch.len() > 1 {
+                    let prefix = if batch[0].kind == RuleKind::Domain {
+                        "full:"
+                    } else {
+                        "domain:"
+                    };
+                    value["domain"] = json!(
+                        batch
+                            .iter()
+                            .map(|r| format!("{prefix}{}", r.value))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Some(value)
+            });
         if plan.custom_rules_first {
             rules.splice(custom_start..custom_start, custom);
         } else {
@@ -434,7 +444,7 @@ fn routing(plan: &SessionPlan) -> Value {
     }
 
     json!({
-        "domainStrategy": if plan.policy == RoutingMode::Direct { "AsIs" } else { "IPIfNonMatch" },
+        "domainStrategy": "AsIs",
         "rules": rules,
     })
 }
@@ -570,7 +580,12 @@ mod tests {
     #[test]
     fn reality_is_expressed_in_stream_settings() {
         let value = emitted(&plan(vless_reality()));
-        let proxy = &value["outbounds"][0];
+        let proxy = value["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == PROXY_TAG)
+            .unwrap();
         assert_eq!(proxy["protocol"], "vless");
         assert_eq!(proxy["streamSettings"]["security"], "reality");
         assert_eq!(
@@ -606,9 +621,9 @@ mod tests {
             extra: serde_json::Value::Null,
         });
         let value = emitted(&plan(node));
-        assert_eq!(value["outbounds"][0]["streamSettings"]["network"], "xhttp");
+        assert_eq!(value["outbounds"][1]["streamSettings"]["network"], "xhttp");
         assert_eq!(
-            value["outbounds"][0]["streamSettings"]["xhttpSettings"]["mode"],
+            value["outbounds"][1]["streamSettings"]["xhttpSettings"]["mode"],
             "packet-up"
         );
 
@@ -627,9 +642,9 @@ mod tests {
             seed: Some("seed".into()),
         });
         let value = emitted(&plan(mkcp));
-        assert_eq!(value["outbounds"][0]["streamSettings"]["network"], "mkcp");
+        assert_eq!(value["outbounds"][1]["streamSettings"]["network"], "mkcp");
         assert_eq!(
-            value["outbounds"][0]["streamSettings"]["kcpSettings"]["header"]["type"],
+            value["outbounds"][1]["streamSettings"]["kcpSettings"]["header"]["type"],
             "srtp"
         );
     }
@@ -653,7 +668,7 @@ mod tests {
         }];
         let value = emitted(&plan);
         assert_eq!(
-            value["routing"]["rules"][1]["domain"][0],
+            value["routing"]["rules"][0]["domain"][0],
             "full:exact.example"
         );
     }
@@ -691,9 +706,9 @@ mod tests {
         );
         let value = emitted(&plan(node));
         assert_eq!(
-            value["outbounds"][0]["settings"]["servers"][0]["password"],
+            value["outbounds"][1]["settings"]["servers"][0]["password"],
             "hunter2"
         );
-        assert_eq!(value["outbounds"][0]["streamSettings"]["security"], "tls");
+        assert_eq!(value["outbounds"][1]["streamSettings"]["security"], "tls");
     }
 }

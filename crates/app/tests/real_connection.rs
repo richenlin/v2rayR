@@ -322,6 +322,87 @@ async fn verifies_vless_and_restores_previous_session_and_journal() {
             assert!(tokio::net::TcpStream::connect(addr).await.is_err());
         }
     }
+    // Exercise the owning session path with legacy flags enabled: PAC
+    // simplification must never be followed by hidden ads/Geo routes.
+    app.save_settings_and_apply(&[
+        v2rayr_ipc::SettingsPatch {
+            group: v2rayr_ipc::SettingsGroupId::Routing,
+            values: {
+                let mut v = serde_json::to_value(app.settings().routing).unwrap();
+                v["ruleSetEnabled"] = true.into();
+                v["blockAds"] = true.into();
+                v
+            },
+        },
+        v2rayr_ipc::SettingsPatch {
+            group: v2rayr_ipc::SettingsGroupId::Inbound,
+            values: {
+                let mut v = serde_json::to_value(app.settings().inbound).unwrap();
+                v["allowLan"] = false.into();
+                v["bypassLocal"] = true.into();
+                v["bypassExtra"] = "*.example.com".into();
+                v
+            },
+        },
+    ])
+    .await
+    .unwrap();
+    app.add_rule("ip-cidr", "198.51.100.20/32", "proxy")
+        .unwrap();
+    std::fs::write(
+        paths.config_dir().join("pac-rules.json"),
+        r#"[[["example.com"],[]]]"#,
+    )
+    .unwrap();
+    for core in [
+        v2rayr_ipc::CoreOverride::Xray,
+        v2rayr_ipc::CoreOverride::SingBox,
+    ] {
+        app.save_settings_and_apply(&[v2rayr_ipc::SettingsPatch {
+            group: v2rayr_ipc::SettingsGroupId::Advanced,
+            values: {
+                let mut v = serde_json::to_value(app.settings().advanced).unwrap();
+                v["coreOverride"] = serde_json::to_value(core).unwrap();
+                v
+            },
+        }])
+        .await
+        .unwrap();
+        let snapshot = app
+            .connect(ConnectionRequest {
+                mode: TakeoverMode::Pac,
+                policy: RoutingPolicy::Rule,
+                ..request.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(snapshot.connection.mode, TakeoverMode::SystemProxy);
+        assert!(snapshot.connection.pac_url.is_none());
+        let journal: TakeoverSnapshot =
+            serde_json::from_slice(&std::fs::read(paths.takeover_snapshot()).unwrap()).unwrap();
+        let target = journal.target.unwrap();
+        assert!(target.bypass.is_empty());
+        assert!(target.pac.is_none());
+        let config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(paths.core_config(snapshot.connection.core.unwrap().as_str())).unwrap(),
+        )
+        .unwrap();
+        let route = config
+            .get("route")
+            .or_else(|| config.get("routing"))
+            .unwrap();
+        assert!(route["rule_set"].is_null());
+        let rules = route["rules"].as_array().unwrap();
+        assert!(rules.iter().all(|r| r.get("domain").is_none()
+            && r.get("rule_set").is_none()
+            && r.get("action").and_then(|a| a.as_str()) != Some("reject")));
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.get("ip").or_else(|| r.get("ip_cidr")).is_some())
+        );
+        app.disconnect().await.unwrap();
+    }
     backend_task.abort();
 }
 

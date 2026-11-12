@@ -16,6 +16,16 @@ use crate::yaml::to_yaml;
 use crate::{ConfigError, EmittedConfig, Format};
 
 pub fn emit(plan: &SessionPlan) -> Result<EmittedConfig, ConfigError> {
+    if plan.policy == RoutingMode::Rule
+        && plan
+            .rules
+            .iter()
+            .any(|rule| rule.value.contains(',') || rule.value.chars().any(char::is_control))
+    {
+        return Err(ConfigError::InvalidPlan(
+            "Mihomo 规则值不能包含逗号或控制字符".into(),
+        ));
+    }
     if choose_core(&plan.profile, Some(CoreKind::Mihomo)).is_err() {
         return Err(ConfigError::Unsupported {
             core: "mihomo",
@@ -283,12 +293,6 @@ fn transport(transport: &Transport, node: &mut Map<String, Value>) {
 
 fn rules(plan: &SessionPlan) -> Vec<Value> {
     let mut rules = Vec::new();
-    if plan.policy != RoutingMode::Direct {
-        rules.push(json!("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"));
-        rules.push(json!("IP-CIDR,172.16.0.0/12,DIRECT,no-resolve"));
-        rules.push(json!("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"));
-        rules.push(json!("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve"));
-    }
     if plan.policy == RoutingMode::Rule {
         for rule in &plan.rules {
             let target = match rule.action {
@@ -302,10 +306,20 @@ fn rules(plan: &SessionPlan) -> Vec<Value> {
                     format!("DOMAIN-SUFFIX,{},{target}", rule.value)
                 }
                 crate::plan::RuleKind::IpCidr => {
-                    format!("IP-CIDR,{},{target},no-resolve", rule.value)
+                    let matcher = if rule
+                        .value
+                        .split('/')
+                        .next()
+                        .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok())
+                    {
+                        "IP-CIDR6"
+                    } else {
+                        "IP-CIDR"
+                    };
+                    format!("{matcher},{},{target},no-resolve", rule.value)
                 }
                 crate::plan::RuleKind::Process => format!("PROCESS-NAME,{},{target}", rule.value),
-                crate::plan::RuleKind::GeoIp => format!("GEOIP,{},{target}", rule.value),
+                crate::plan::RuleKind::GeoIp => format!("GEOIP,{},{target},no-resolve", rule.value),
                 crate::plan::RuleKind::GeoSite => format!("GEOSITE,{},{target}", rule.value),
             };
             rules.push(json!(line));
@@ -315,8 +329,8 @@ fn rules(plan: &SessionPlan) -> Vec<Value> {
         }
     }
     rules.push(json!(match plan.policy {
-        RoutingMode::Direct => "MATCH,DIRECT",
-        _ => "MATCH,PROXY",
+        RoutingMode::Global => "MATCH,PROXY",
+        _ => "MATCH,DIRECT",
     }));
     rules
 }

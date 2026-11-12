@@ -142,7 +142,7 @@ export function ConnectionPage() {
   const connection = snapshot?.connection;
   const phase = connection?.phase ?? "disconnected";
   const mode = connection?.mode === "pac" ? "system-proxy" : connection?.mode ?? "system-proxy";
-  const policy = connection?.policy ?? "rule";
+  const policy = connection?.requestedPolicy ?? connection?.policy ?? "rule";
 
   const candidates = useMemo(() => {
     const sorted = [...nodes].sort((a, b) => Number(b.favorite) - Number(a.favorite));
@@ -264,7 +264,7 @@ export function ConnectionPage() {
                 {(snapshot.tunAvailable || mode === "tun") ? <option value="tun" disabled={!snapshot.tunAvailable}>{t("connection.mode.tun")}</option> : null}
               </select>
               {mode === "tun" ? <p className="field-hint">{t(snapshot.tunRuleRouting ? "connection.mode.tunRuleHint" : "connection.mode.tunHint")}</p> : null}
-              {mode === "system-proxy" && policy === "rule" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
+              {mode !== "tun" && policy === "rule" ? <p className="field-hint">{t("connection.mode.pacHint")}</p> : null}
             </div>
             <div>
               <label className="field-label" htmlFor="routing-policy">
@@ -276,13 +276,16 @@ export function ConnectionPage() {
                 className="control"
                 style={{ marginTop: 10 }}
                 value={policy}
-                disabled={mode === "tun" && !snapshot.tunRuleRouting}
                 onChange={(event) => void setPolicy(event.target.value as RoutingPolicy)}
               >
-                {mode !== "tun" || snapshot.tunRuleRouting ? <option value="rule">{t("connection.policy.rule")}</option> : null}
+                <option value="rule">{t("connection.policy.rule")}</option>
                 <option value="global">{t("connection.policy.global")}</option>
-                {mode !== "tun" ? <option value="direct">{t("connection.policy.direct")}</option> : null}
+                <option value="direct">{t("connection.policy.direct")}</option>
               </select>
+              <div role="status" aria-live="polite">
+                {connection.policy !== policy ? <p className="field-hint">{t("connection.policy.effective")}: {t(`connection.policy.${connection.policy}`)}</p> : null}
+                {connection.routingWarnings?.map((warning) => <p className="field-hint" key={warning}>{warning}</p>)}
+              </div>
               {snapshot.connection.inboundPort ? (
                 <p className="field-hint mono" style={{ marginTop: 8 }}>
                   {snapshot.connection.mode === "system-proxy" || snapshot.connection.mode === "pac" ? "HTTP/SOCKS" : "SOCKS"} 127.0.0.1:

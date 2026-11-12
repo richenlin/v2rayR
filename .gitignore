@@ -31,3 +31,4 @@ screenshots/
 /test-results/
 # Desktop installers from scripts/package-desktop.sh
 /dist
+docs/reports/

@@ -13,7 +13,7 @@ use v2rayr_store::{RuleAction, RuleKind};
 
 use crate::{
     App, error,
-    rules::{normalize_applications, normalize_rule_value},
+    rules::{normalize_applications, normalize_typed_rule_value},
 };
 
 const VERSION: u32 = 1;
@@ -178,7 +178,7 @@ impl PortableRule {
             .ok_or_else(|| Problem::config("备份包含未知规则动作"))?;
         Ok((
             kind,
-            normalize_rule_value(&self.value)?,
+            normalize_typed_rule_value(kind, &self.value, !self.applications.is_empty())?,
             action,
             self.enabled,
             normalize_applications(&self.applications)?,

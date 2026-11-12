@@ -1,4 +1,5 @@
 use crate::{App, session::LocalHttpProxy, settings::write_atomic};
+use std::io::Read;
 use v2rayr_ipc::Problem;
 
 const SOURCE: &str =
@@ -37,13 +38,28 @@ fn parse_rules(json: &str) -> Result<Rules, Problem> {
     Ok(rules)
 }
 
+fn read_cached_rules(reader: impl Read) -> Result<Rules, Problem> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(crate::error::internal)?;
+    if bytes.len() > MAX_BYTES {
+        return Err(Problem::config("PAC 缓存超过大小限制"));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| Problem::config("PAC 缓存不是 UTF-8"))?;
+    parse_rules(text)
+}
+
 impl App {
-    pub(crate) fn pac_rules(&self) -> Option<Rules> {
+    pub(crate) fn pac_rules(&self) -> Result<Option<Rules>, Problem> {
         let path = self.paths().config_dir().join("pac-rules.json");
-        if path.metadata().ok()?.len() > MAX_BYTES as u64 {
-            return None;
-        }
-        parse_rules(&std::fs::read_to_string(path).ok()?).ok()
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(crate::error::internal(error)),
+        };
+        read_cached_rules(file).map(Some)
     }
 
     pub async fn update_pac_rules(&self) -> Result<usize, Problem> {
@@ -109,7 +125,7 @@ impl App {
         let _guard = self.op_lock.lock().await;
         write_atomic(&self.paths().config_dir().join("pac-rules.json"), &encoded)
             .map_err(crate::error::internal)?;
-        self.reload_active_pac(&rules);
+        self.logs.info("routing", "PAC 规则已保存，下次连接生效");
         Ok(rules.iter().flatten().map(Vec::len).sum())
     }
 }
@@ -123,6 +139,42 @@ mod tests {
 
     use crate::test_support::temp_app;
 
+    #[test]
+    fn cache_reader_is_bounded_even_without_file_metadata() {
+        let mut reader = std::io::repeat(b' ');
+        assert!(
+            super::read_cached_rules(&mut reader)
+                .unwrap_err()
+                .detail
+                .unwrap()
+                .contains("大小限制")
+        );
+        assert!(
+            super::read_cached_rules(&b"\xff"[..])
+                .unwrap_err()
+                .detail
+                .unwrap()
+                .contains("UTF-8")
+        );
+    }
+    #[test]
+    fn cache_missing_corrupt_and_oversized_are_distinct() {
+        let app = temp_app();
+        assert!(app.pac_rules().unwrap().is_none());
+        let path = app.paths().config_dir().join("pac-rules.json");
+        std::fs::write(&path, "broken").unwrap();
+        assert!(app.pac_rules().is_err());
+        std::fs::write(&path, " ".repeat(super::MAX_BYTES + 1)).unwrap();
+        assert!(
+            app.pac_rules()
+                .unwrap_err()
+                .detail
+                .unwrap()
+                .contains("大小限制")
+        );
+        std::fs::write(&path, r#"[[["Example.COM."],["proxy.net"]]]"#).unwrap();
+        assert_eq!(app.pac_rules().unwrap().unwrap()[0][0][0], "example.com");
+    }
     #[tokio::test]
     async fn download_is_refused_until_a_node_is_connected() {
         let error = temp_app()

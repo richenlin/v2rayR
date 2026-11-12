@@ -104,7 +104,7 @@ pub(crate) fn emit_with_ingress(
         emitted = emitted.with_note("FakeIP 需要 TUN，本版本未启用，已忽略该设置");
     }
     if plan.rule_sets.is_empty() && plan.policy == RoutingMode::Rule {
-        emitted = emitted.with_note("未找到规则集文件，规则模式只使用内置私有网段与自定义规则");
+        emitted = emitted.with_note("规则模式按有序路由计划匹配，未命中直连");
     }
     Ok(emitted)
 }
@@ -471,21 +471,33 @@ fn transport(transport: &Transport) -> Option<Value> {
 
 fn route(plan: &SessionPlan, application_rules: Option<Vec<Value>>) -> Value {
     let final_tag = match plan.policy {
-        RoutingMode::Direct => "direct",
-        _ => PROXY_TAG,
+        RoutingMode::Global => PROXY_TAG,
+        _ => "direct",
     };
 
     let mut rules = Vec::new();
     if plan.sniffing {
         rules.push(json!({"action": "sniff"}));
     }
-    if plan.policy != RoutingMode::Direct {
-        rules.push(json!({"ip_is_private": true, "outbound": "direct"}));
-    }
 
     if plan.policy == RoutingMode::Rule {
-        let custom = application_rules
-            .unwrap_or_else(|| plan.rules.iter().filter_map(custom_rule).collect());
+        let custom = application_rules.unwrap_or_else(|| {
+            crate::routing::batches(&plan.rules)
+                .into_iter()
+                .filter_map(|batch| {
+                    let mut value = custom_rule(&batch[0])?;
+                    if batch.len() > 1 {
+                        let key = if batch[0].kind == crate::RuleKind::Domain {
+                            "domain"
+                        } else {
+                            "domain_suffix"
+                        };
+                        value[key] = json!(batch.iter().map(|r| &r.value).collect::<Vec<_>>());
+                    }
+                    Some(value)
+                })
+                .collect()
+        });
         let custom_start = rules.len();
         for rule_set in &plan.rule_sets {
             match rule_set.kind {
@@ -493,6 +505,7 @@ fn route(plan: &SessionPlan, application_rules: Option<Vec<Value>>) -> Value {
                     "rule_set": [rule_set.tag],
                     "outbound": "direct",
                 })),
+                RuleSetKind::ReferenceOnly => {}
                 RuleSetKind::Ads => {
                     if plan.block_ads {
                         rules.push(json!({"rule_set": [rule_set.tag], "action": "reject"}));
@@ -669,13 +682,13 @@ mod tests {
         assert!(json["inbounds"][0]["users"].is_null());
         assert_eq!(json["inbounds"][1]["users"].as_array().unwrap().len(), 3);
         let rules = json["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules[1]["auth_user"], json!(["application-0"]));
-        assert_eq!(rules[1]["inbound"], json!(["application-in"]));
-        assert_eq!(rules[1]["outbound"], "proxy");
-        assert_eq!(rules[2]["auth_user"], json!(["application-1"]));
-        assert_eq!(rules[2]["action"], "reject");
-        assert_eq!(rules[3]["outbound"], "direct");
-        assert!(rules[3]["auth_user"].is_null());
+        assert_eq!(rules[0]["auth_user"], json!(["application-0"]));
+        assert_eq!(rules[0]["inbound"], json!(["application-in"]));
+        assert_eq!(rules[0]["outbound"], "proxy");
+        assert_eq!(rules[1]["auth_user"], json!(["application-1"]));
+        assert_eq!(rules[1]["action"], "reject");
+        assert_eq!(rules[2]["outbound"], "direct");
+        assert!(rules[2]["auth_user"].is_null());
         plan.policy = RoutingMode::Global;
         assert!(
             application_ingress::emit(
@@ -848,10 +861,16 @@ mod tests {
     }
 
     #[test]
-    fn rule_mode_passes_private_addresses_directly() {
+    fn rule_mode_defaults_direct_without_preempting_custom_private_rules() {
         let value = emitted(&plan(vless_ws()));
-        assert_eq!(value["route"]["rules"][1]["ip_is_private"], true);
-        assert_eq!(value["route"]["final"], PROXY_TAG);
+        assert!(
+            value["route"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["ip_is_private"].is_null())
+        );
+        assert_eq!(value["route"]["final"], "direct");
     }
 
     #[test]

@@ -89,6 +89,8 @@ export interface ConnectionState {
   phase: ConnectionPhase;
   mode: TakeoverMode;
   policy: RoutingPolicy;
+  requestedPolicy?: RoutingPolicy;
+  routingWarnings?: string[];
   profileId?: string;
   profileRemark?: string;
   core?: CoreKind;

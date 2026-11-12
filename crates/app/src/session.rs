@@ -63,9 +63,7 @@ pub(crate) struct SessionRuntime {
     http_port: Option<u16>,
     api_port: Option<u16>,
     api_secret: String,
-    pub(crate) traffic_probe: Option<v2rayr_engine::traffic::TrafficProbe>,
-    pub(crate) traffic_warned: bool,
-    pub(crate) traffic_pruned_at: Option<std::time::Instant>,
+    pub(crate) traffic_program: Option<std::path::PathBuf>,
     traffic_baseline: Option<(std::time::Instant, v2rayr_engine::traffic::Counters)>,
     traffic_connections: u32,
     started_at: Option<chrono::DateTime<Utc>>,
@@ -99,9 +97,7 @@ impl SessionRuntime {
             http_port: None,
             api_port: None,
             api_secret: new_secret(),
-            traffic_probe: None,
-            traffic_warned: false,
-            traffic_pruned_at: None,
+            traffic_program: None,
             traffic_baseline: None,
             traffic_connections: 0,
             started_at: None,
@@ -830,13 +826,7 @@ impl App {
             session.total_down = total_down;
             session.total_up = total_up;
             session.samples.clear();
-            session.traffic_probe = Some(if core == CoreKind::Xray {
-                v2rayr_engine::traffic::TrafficProbe::xray(api_port)
-            } else {
-                v2rayr_engine::traffic::TrafficProbe::clash(api_port, session.api_secret.clone())
-            });
-            session.traffic_warned = false;
-            session.traffic_pruned_at = None;
+            session.traffic_program = (core == CoreKind::Xray).then_some(spec.program);
             session.traffic_baseline = Some((traffic_started, Default::default()));
             session.traffic_connections = 0;
         }
@@ -913,9 +903,7 @@ impl App {
             session.http_port = None;
             session.api_port = None;
             session.samples.clear();
-            session.traffic_probe = None;
-            session.traffic_warned = false;
-            session.traffic_pruned_at = None;
+            session.traffic_program = None;
             session.traffic_baseline = None;
             session.traffic_connections = 0;
             session.lan = None;

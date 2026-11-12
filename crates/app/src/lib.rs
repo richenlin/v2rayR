@@ -38,12 +38,6 @@ use v2rayr_store::{
 
 use crate::logging::LogBus;
 use crate::session::SessionRuntime;
-
-/// Process entry for the detached core guardian. Returns immediately unless
-/// this process was started with `--internal-core-guardian`.
-pub fn dispatch_core_guardian() {
-    v2rayr_engine::guardian::dispatch();
-}
 use crate::settings::{CURRENT_SCHEMA, LoadedSettings, write_atomic};
 
 /// How a UI receives state changes. The desktop shell forwards these to Tauri
@@ -567,63 +561,50 @@ impl App {
         if self.check_kernel_exit().await {
             return None;
         }
-        let (port, secret, probe) = {
-            let mut session = self.session.lock().expect("session");
+        let (port, secret, xray) = {
+            let session = self.session.lock().expect("session");
             if session.phase() != v2rayr_ipc::ConnectionPhase::Connected {
                 return None;
             }
             (
                 session.api_port()?,
                 session.api_secret().to_owned(),
-                session.traffic_probe.take()?,
+                session.traffic_program.clone(),
             )
         };
-        let counters = probe.totals().await;
-        let at = std::time::Instant::now();
-        let now = Utc::now();
-        let guard = self.op_lock.try_lock();
-        let recorded = {
-            let mut session = self.session.lock().expect("session");
-            let current = session.phase() == v2rayr_ipc::ConnectionPhase::Connected
-                && session.api_port() == Some(port)
-                && session.api_secret() == secret;
-            if current {
-                session.traffic_probe = Some(probe);
-            }
-            if guard.is_err() || !current {
-                None
-            } else {
-                match counters {
-                    Ok(counters) => session
-                        .record_counters(at, now.timestamp_millis(), counters)
-                        .map(|delta| {
-                            let prune = session.traffic_pruned_at.is_none_or(|seen| {
-                                seen.elapsed() >= std::time::Duration::from_secs(60)
-                            });
-                            if prune {
-                                session.traffic_pruned_at = Some(at);
-                            }
-                            (session.traffic_view(), delta, prune)
-                        }),
-                    Err(error) => {
-                        if !session.traffic_warned {
-                            session.traffic_warned = true;
-                            self.logs.warn("traffic", format!("读取流量失败: {error}"));
-                        }
-                        None
-                    }
-                }
+        let counters = if let Some(program) = xray {
+            v2rayr_engine::traffic::xray_totals(&program, port).await
+        } else {
+            v2rayr_engine::ClashClient::new(port, secret.clone())
+                .traffic_totals()
+                .await
+        };
+        let counters = match counters {
+            Ok(counters) => counters,
+            Err(error) => {
+                self.logs.warn("traffic", format!("读取流量失败: {error}"));
+                return None;
             }
         };
-        let (view, (down, up), prune) = recorded?;
+        let at = std::time::Instant::now();
+        let now = Utc::now();
+        let _guard = self.op_lock.try_lock().ok()?;
+        let (view, (down, up)) = {
+            let mut session = self.session.lock().expect("session");
+            if session.phase() != v2rayr_ipc::ConnectionPhase::Connected
+                || session.api_port() != Some(port)
+                || session.api_secret() != secret
+            {
+                return None;
+            }
+            let delta = session.record_counters(at, now.timestamp_millis(), counters)?;
+            (session.traffic_view(), delta)
+        };
         {
             let db = self.db.lock().expect("db");
-            let _ = db.record_tick(
-                now,
-                down,
-                up,
-                prune.then_some(now - chrono::Duration::hours(1)),
-            );
+            let _ = db.add_totals(down, up);
+            let _ = db.record_traffic(now, down, up);
+            let _ = db.prune_traffic(now - chrono::Duration::hours(2));
         }
         self.events.emit(EventName::TRAFFIC, json!(view));
         Some(view)
@@ -751,26 +732,9 @@ impl App {
                 }
             }
             Err(error) => {
-                // Never delete the only recovery clue: a corrupt journal is moved
-                // aside (same bytes, discoverable path) and the failure is logged.
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|elapsed| elapsed.as_millis())
-                    .unwrap_or_default();
-                let preserved = path.with_file_name(format!("takeover.corrupt-{stamp}.json"));
-                match std::fs::rename(&path, &preserved) {
-                    Ok(()) => self.logs.warn(
-                        "takeover",
-                        format!(
-                            "接管快照损坏，已保留为 {} 以便排查: {error}",
-                            preserved.display()
-                        ),
-                    ),
-                    Err(rename) => self.logs.warn(
-                        "takeover",
-                        format!("接管快照损坏且无法留存（{rename}），保持原文件不动: {error}"),
-                    ),
-                }
+                self.logs
+                    .warn("takeover", format!("接管快照损坏，已忽略: {error}"));
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
@@ -984,56 +948,5 @@ pub(crate) mod test_support {
         let paths = AppPaths::new(root);
         let options = AppOptions::new("0.0.0-test").with_proxy(Arc::new(NoopProxy));
         App::open(paths, options).expect("open test app")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::NoopProxy;
-
-    #[test]
-    fn a_corrupt_takeover_journal_is_preserved_instead_of_deleted() {
-        let root = std::env::temp_dir().join(format!(
-            "v2rayr-journal-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let paths = v2rayr_platform::AppPaths::new(root);
-        paths.ensure().expect("paths");
-        std::fs::create_dir_all(paths.runtime_dir()).expect("run dir");
-        std::fs::write(paths.takeover_snapshot(), b"{\"garbage\":").expect("seed journal");
-
-        let app = App::open(
-            paths.clone(),
-            AppOptions::new("0.0.0-test").with_proxy(Arc::new(NoopProxy)),
-        )
-        .expect("open");
-
-        let entries: Vec<String> = std::fs::read_dir(paths.runtime_dir())
-            .expect("read run dir")
-            .map(|entry| {
-                entry
-                    .expect("entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert!(
-            !entries.iter().any(|name| name == "takeover.json"),
-            "the unreadable journal must not stay in place: {entries:?}"
-        );
-        let preserved = entries
-            .iter()
-            .find(|name| name.starts_with("takeover.corrupt-"))
-            .unwrap_or_else(|| panic!("corrupt journal must be preserved: {entries:?}"));
-        let kept = std::fs::read_to_string(paths.runtime_dir().join(preserved)).expect("read kept");
-        assert!(
-            kept.contains("garbage"),
-            "preserved journal must keep the original bytes: {kept}"
-        );
-        drop(app);
-        let _ = std::fs::remove_dir_all(paths.root());
     }
 }

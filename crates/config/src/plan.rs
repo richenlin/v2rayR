@@ -23,7 +23,7 @@ impl RoutingMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleKind {
     Domain,
     DomainSuffix,
@@ -61,6 +61,8 @@ pub struct RuleSetRef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleSetKind {
+    /// Resource referenced explicitly by a custom rule; no implicit route.
+    ReferenceOnly,
     /// Domestic sites: go direct.
     CnSites,
     /// Domestic IP ranges: go direct.

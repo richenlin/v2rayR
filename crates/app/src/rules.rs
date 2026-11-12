@@ -148,7 +148,7 @@ fn rule_fields(
         Problem::new(ErrorCode::InvalidValue.as_str(), false)
             .with_detail(format!("未知的规则动作：{action}"))
     })?;
-    let value = normalize_rule_value(value)?;
+    let value = normalize_typed_rule_value(kind, value, !applications.is_empty())?;
     Ok((kind, value, action, applications))
 }
 
@@ -160,8 +160,12 @@ pub(crate) fn tun_rule(
 
     let target = match row.kind {
         RuleKind::Domain if row.value == "*" && !row.applications.is_empty() => TunRuleTarget::Any,
-        RuleKind::Domain => TunRuleTarget::Domain(row.value.clone()),
-        RuleKind::DomainSuffix => TunRuleTarget::DomainSuffix(row.value.clone()),
+        RuleKind::Domain => {
+            TunRuleTarget::Domain(row.value.trim_end_matches('.').to_ascii_lowercase())
+        }
+        RuleKind::DomainSuffix => {
+            TunRuleTarget::DomainSuffix(row.value.trim_matches('.').to_ascii_lowercase())
+        }
         RuleKind::IpCidr => TunRuleTarget::IpCidr(row.value.clone()),
         _ => {
             return Err(Problem::config(format!(
@@ -197,62 +201,72 @@ pub(crate) fn tun_rule(
     })
 }
 
-pub(crate) fn pac_overrides(
-    rules: &mut [v2rayr_config::CustomRule],
-) -> Vec<v2rayr_platform::PacOverride> {
-    use v2rayr_config::{RuleAction, RuleKind};
-    use v2rayr_platform::{PacMatch, PacOverride};
-
-    rules
-        .iter_mut()
-        .filter_map(|rule| {
-            let target = match rule.kind {
-                RuleKind::Domain | RuleKind::DomainSuffix => {
-                    let domain = rule.value.trim_end_matches('.').to_ascii_lowercase();
-                    let domain = if rule.kind == RuleKind::DomainSuffix {
-                        domain.trim_start_matches('.')
-                    } else {
-                        &domain
-                    };
-                    if domain.is_empty() || domain == "*" {
-                        return None;
-                    }
-                    rule.value = domain.to_owned();
-                    if rule.kind == RuleKind::Domain {
-                        PacMatch::Domain(rule.value.clone())
-                    } else {
-                        PacMatch::DomainSuffix(rule.value.clone())
-                    }
-                }
-                RuleKind::IpCidr => {
-                    let (address, bits) = rule.value.split_once('/')?;
-                    let address: std::net::IpAddr = address.parse().ok()?;
-                    let bits = bits.parse::<u8>().ok()?;
-                    if bits > if address.is_ipv4() { 32 } else { 128 } {
-                        return None;
-                    }
-                    PacMatch::Ip(address, bits)
-                }
-                _ => return None,
-            };
-            Some(PacOverride {
-                target,
-                direct: rule.action == RuleAction::Direct,
-            })
-        })
-        .collect()
-}
-
 pub(crate) fn into_config_rule(row: v2rayr_store::RuleRow) -> v2rayr_config::CustomRule {
     use v2rayr_config::{CustomRule, RuleAction};
     CustomRule {
         kind: crate::config_rule_kind(row.kind),
-        value: row.value,
+        value: match row.kind {
+            v2rayr_store::RuleKind::Domain => row.value.trim_end_matches('.').to_ascii_lowercase(),
+            v2rayr_store::RuleKind::DomainSuffix => {
+                row.value.trim_matches('.').to_ascii_lowercase()
+            }
+            _ => row.value,
+        },
         action: match row.action {
             v2rayr_store::RuleAction::Proxy => RuleAction::Proxy,
             v2rayr_store::RuleAction::Direct => RuleAction::Direct,
             v2rayr_store::RuleAction::Block => RuleAction::Block,
         },
+    }
+}
+
+pub(crate) fn normalize_typed_rule_value(
+    kind: v2rayr_store::RuleKind,
+    value: &str,
+    scoped: bool,
+) -> Result<String, Problem> {
+    use v2rayr_store::RuleKind;
+    let value = normalize_rule_value(value)?;
+    match kind {
+        RuleKind::Domain | RuleKind::DomainSuffix => {
+            if kind == RuleKind::Domain && value == "*" && scoped {
+                return Ok(value);
+            }
+            let domain = if kind == RuleKind::DomainSuffix {
+                value.trim_matches('.')
+            } else {
+                value.trim_end_matches('.')
+            };
+            if domain.is_empty()
+                || domain.len() > 253
+                || !domain.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+            {
+                return Err(Problem::config(
+                    "域名规则格式无效，请填写域名（国际域名使用 Punycode）",
+                ));
+            }
+            Ok(domain.to_ascii_lowercase())
+        }
+        RuleKind::IpCidr => {
+            let valid = value.split_once('/').is_some_and(|(ip, bits)| {
+                match (ip.parse::<std::net::IpAddr>(), bits.parse::<u8>()) {
+                    (Ok(std::net::IpAddr::V4(_)), Ok(bits)) => bits <= 32,
+                    (Ok(std::net::IpAddr::V6(_)), Ok(bits)) => bits <= 128,
+                    _ => false,
+                }
+            });
+            if !valid {
+                return Err(Problem::config("IP 网段规则格式无效"));
+            }
+            Ok(value)
+        }
+        _ => Ok(value),
     }
 }
 
@@ -262,9 +276,9 @@ pub(crate) fn normalize_rule_value(value: &str) -> Result<String, Problem> {
         return Err(Problem::new(ErrorCode::InvalidValue.as_str(), false)
             .with_detail("规则内容不能为空".to_owned()));
     }
-    if value.len() > 256 || value.contains('\n') || value.contains('\r') {
+    if value.len() > 256 || value.contains(',') || value.chars().any(char::is_control) {
         return Err(Problem::new(ErrorCode::InvalidValue.as_str(), false)
-            .with_detail("规则内容过长或包含换行".to_owned()));
+            .with_detail("规则内容过长或包含逗号/控制字符".to_owned()));
     }
     Ok(value.to_owned())
 }
@@ -435,6 +449,27 @@ mod tests {
     use crate::test_support::temp_app;
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn saved_rules_reject_delimiter_injection_and_invalid_targets() {
+        let app = temp_app();
+        for (kind, value) in [
+            ("domain", "x.com,REJECT"),
+            ("domain", "https://x.com"),
+            ("domain-suffix", "a..com"),
+            ("ip-cidr", "10.0.0.1/99"),
+            ("process", "x\tbad"),
+        ] {
+            assert!(
+                app.add_rule(kind, value, "proxy").is_err(),
+                "{kind} {value}"
+            );
+        }
+        assert!(
+            app.add_rule("domain-suffix", ".Example.COM", "direct")
+                .is_ok()
+        );
+        assert!(app.add_rule("ip-cidr", "2001:db8::/32", "direct").is_ok());
+    }
     #[test]
     fn macos_same_name_bundles_and_helpers_have_independent_identities() {
         use super::inspect_rule_applications;
